@@ -78,7 +78,7 @@ WantedBy=multi-user.target
 - Zero-copy, minimal allocs on hotpath
 - DC Healthchecks + global fallback
 - No global mutable state
-- Client isolation
+- Client isolation + Fair Bandwidth
 - Backpressure-aware IO
 - "Secret Policy" - SNI / Secret Routing :D
 - Multi-upstream Balancer and Failover
