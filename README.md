@@ -233,7 +233,7 @@ telemt config.toml
 
 ## Issues
 - ✅ [SOCKS5 as Upstream](https://github.com/telemt/telemt/issues/1) -> added Upstream Management
-- ⌛ [iOS - Media Upload Hanging-in-Loop](https://github.com/telemt/telemt/issues/2)
+- ✅ [iOS - Media Upload Hanging-in-Loop](https://github.com/telemt/telemt/issues/2)
 
 ## Roadmap
 - Public IP in links
