@@ -61,7 +61,7 @@ where
     
     // Check for replay
     if replay_checker.check_tls_digest(digest_half) {
-        warn!(peer = %peer, "TLS replay attack detected");
+        warn!(peer = %peer, "TLS replay attack detected (duplicate digest)");
         return HandshakeResult::BadClient { reader, writer };
     }
     
@@ -72,8 +72,6 @@ where
         })
         .collect();
     
-    debug!(peer = %peer, num_users = secrets.len(), "Validating TLS handshake against users");
-    
     // Validate handshake
     let validation = match tls::validate_tls_handshake(
         handshake,
@@ -82,7 +80,11 @@ where
     ) {
         Some(v) => v,
         None => {
-            debug!(peer = %peer, "TLS handshake validation failed - no matching user");
+            debug!(
+                peer = %peer, 
+                ignore_time_skew = config.access.ignore_time_skew,
+                "TLS handshake validation failed - no matching user or time skew"
+            );
             return HandshakeResult::BadClient { reader, writer };
         }
     };
@@ -104,14 +106,16 @@ where
     debug!(peer = %peer, response_len = response.len(), "Sending TLS ServerHello");
     
     if let Err(e) = writer.write_all(&response).await {
+        warn!(peer = %peer, error = %e, "Failed to write TLS ServerHello");
         return HandshakeResult::Error(ProxyError::Io(e));
     }
     
     if let Err(e) = writer.flush().await {
+        warn!(peer = %peer, error = %e, "Failed to flush TLS ServerHello");
         return HandshakeResult::Error(ProxyError::Io(e));
     }
     
-    // Record for replay protection
+    // Record for replay protection only after successful handshake
     replay_checker.add_tls_digest(digest_half);
     
     info!(
@@ -146,12 +150,6 @@ where
     // Extract prekey and IV
     let dec_prekey_iv = &handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN];
     
-    debug!(
-        peer = %peer,
-        dec_prekey_iv = %hex::encode(dec_prekey_iv),
-        "Extracted prekey+IV from handshake"
-    );
-    
     // Check for replay
     if replay_checker.check_handshake(dec_prekey_iv) {
         warn!(peer = %peer, "MTProto replay attack detected");
@@ -183,13 +181,6 @@ where
         let mut decryptor = AesCtr::new(&dec_key, dec_iv);
         let decrypted = decryptor.decrypt(handshake);
         
-        trace!(
-            peer = %peer,
-            user = %user,
-            decrypted_tail = %hex::encode(&decrypted[PROTO_TAG_POS..]),
-            "Decrypted handshake tail"
-        );
-        
         // Check protocol tag
         let tag_bytes: [u8; 4] = decrypted[PROTO_TAG_POS..PROTO_TAG_POS + 4]
             .try_into()
@@ -197,13 +188,8 @@ where
         
         let proto_tag = match ProtoTag::from_bytes(tag_bytes) {
             Some(tag) => tag,
-            None => {
-                trace!(peer = %peer, user = %user, tag = %hex::encode(tag_bytes), "Invalid proto tag");
-                continue;
-            }
+            None => continue,
         };
-        
-        debug!(peer = %peer, user = %user, proto = ?proto_tag, "Found valid proto tag");
         
         // Check if mode is enabled
         let mode_ok = match proto_tag {
@@ -274,9 +260,6 @@ where
 }
 
 /// Generate nonce for Telegram connection
-/// 
-/// In FAST MODE: we use the same keys for TG as for client, but reversed.
-/// This means: client's enc_key becomes TG's dec_key and vice versa.
 pub fn generate_tg_nonce(
     proto_tag: ProtoTag, 
     client_dec_key: &[u8; 32],
@@ -287,39 +270,22 @@ pub fn generate_tg_nonce(
         let bytes = SECURE_RANDOM.bytes(HANDSHAKE_LEN);
         let mut nonce: [u8; HANDSHAKE_LEN] = bytes.try_into().unwrap();
         
-        // Check reserved patterns
-        if RESERVED_NONCE_FIRST_BYTES.contains(&nonce[0]) {
-            continue;
-        }
+        if RESERVED_NONCE_FIRST_BYTES.contains(&nonce[0]) { continue; }
         
         let first_four: [u8; 4] = nonce[..4].try_into().unwrap();
-        if RESERVED_NONCE_BEGINNINGS.contains(&first_four) {
-            continue;
-        }
+        if RESERVED_NONCE_BEGINNINGS.contains(&first_four) { continue; }
         
         let continue_four: [u8; 4] = nonce[4..8].try_into().unwrap();
-        if RESERVED_NONCE_CONTINUES.contains(&continue_four) {
-            continue;
-        }
+        if RESERVED_NONCE_CONTINUES.contains(&continue_four) { continue; }
         
-        // Set protocol tag
         nonce[PROTO_TAG_POS..PROTO_TAG_POS + 4].copy_from_slice(&proto_tag.to_bytes());
         
-        // Fast mode: copy client's dec_key+iv (this becomes TG's enc direction)
-        // In fast mode, we make TG use the same keys as client but swapped:
-        // - What we decrypt FROM TG = what we encrypt TO client (so no re-encryption needed)
-        // - What we encrypt TO TG = what we decrypt FROM client
         if fast_mode {
-            // Put client's dec_key + dec_iv into nonce[8:56]
-            // This will be used by TG for encryption TO us
             nonce[SKIP_LEN..SKIP_LEN + KEY_LEN].copy_from_slice(client_dec_key);
             nonce[SKIP_LEN + KEY_LEN..SKIP_LEN + KEY_LEN + IV_LEN]
                 .copy_from_slice(&client_dec_iv.to_be_bytes());
         }
         
-        // Now compute what keys WE will use for TG connection
-        // enc_key_iv = nonce[8:56] (for encrypting TO TG)
-        // dec_key_iv = nonce[8:56] reversed (for decrypting FROM TG)
         let enc_key_iv = &nonce[SKIP_LEN..SKIP_LEN + KEY_LEN + IV_LEN];
         let dec_key_iv: Vec<u8> = enc_key_iv.iter().rev().copied().collect();
         
@@ -329,43 +295,21 @@ pub fn generate_tg_nonce(
         let tg_dec_key: [u8; 32] = dec_key_iv[..KEY_LEN].try_into().unwrap();
         let tg_dec_iv = u128::from_be_bytes(dec_key_iv[KEY_LEN..].try_into().unwrap());
         
-        debug!(
-            fast_mode = fast_mode,
-            tg_enc_key = %hex::encode(&tg_enc_key[..8]),
-            tg_dec_key = %hex::encode(&tg_dec_key[..8]),
-            "Generated TG nonce"
-        );
-        
         return (nonce, tg_enc_key, tg_enc_iv, tg_dec_key, tg_dec_iv);
     }
 }
 
 /// Encrypt nonce for sending to Telegram
-/// 
-/// Only the part from PROTO_TAG_POS onwards is encrypted.
-/// The encryption key is derived from enc_key_iv in the nonce itself.
 pub fn encrypt_tg_nonce(nonce: &[u8; HANDSHAKE_LEN]) -> Vec<u8> {
-    // enc_key_iv is at nonce[8:56]
     let enc_key_iv = &nonce[SKIP_LEN..SKIP_LEN + KEY_LEN + IV_LEN];
-    
-    // Key for encrypting is just the first 32 bytes of enc_key_iv
     let key: [u8; 32] = enc_key_iv[..KEY_LEN].try_into().unwrap();
     let iv = u128::from_be_bytes(enc_key_iv[KEY_LEN..].try_into().unwrap());
     
     let mut encryptor = AesCtr::new(&key, iv);
-    
-    // Encrypt the entire nonce first, then take only the encrypted tail
     let encrypted_full = encryptor.encrypt(nonce);
     
-    // Result: unencrypted head + encrypted tail
     let mut result = nonce[..PROTO_TAG_POS].to_vec();
     result.extend_from_slice(&encrypted_full[PROTO_TAG_POS..]);
-    
-    trace!(
-        original = %hex::encode(&nonce[PROTO_TAG_POS..]),
-        encrypted = %hex::encode(&result[PROTO_TAG_POS..]),
-        "Encrypted nonce tail"
-    );
     
     result
 }

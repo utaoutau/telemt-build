@@ -17,12 +17,13 @@ use crate::transport::{configure_client_socket, UpstreamManager};
 use crate::stream::{CryptoReader, CryptoWriter, FakeTlsReader, FakeTlsWriter, BufferPool};
 use crate::crypto::AesCtr;
 
-use super::handshake::{
+// Use absolute paths to avoid confusion
+use crate::proxy::handshake::{
     handle_tls_handshake, handle_mtproto_handshake, 
     HandshakeSuccess, generate_tg_nonce, encrypt_tg_nonce,
 };
-use super::relay::relay_bidirectional;
-use super::masking::handle_bad_client;
+use crate::proxy::relay::relay_bidirectional;
+use crate::proxy::masking::handle_bad_client;
 
 /// Client connection handler (builder struct)
 pub struct ClientHandler;

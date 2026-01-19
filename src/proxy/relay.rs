@@ -48,7 +48,12 @@ where
     // Client -> Server task
     let c2s = tokio::spawn(async move {
         // Get buffer from pool
-        let mut buf = pool_c2s.get();
+        let mut pooled_buf = pool_c2s.get();
+        // CRITICAL FIX: BytesMut from pool has len 0. We must resize it to be usable as &mut [u8].
+        // We use the full capacity.
+        let cap = pooled_buf.capacity();
+        pooled_buf.resize(cap, 0);
+        
         let mut total_bytes = 0u64;
         let mut prev_total_bytes = 0u64;
         let mut msg_count = 0u64;
@@ -59,7 +64,7 @@ where
             // Read with timeout
             let read_result = tokio::time::timeout(
                 activity_timeout,
-                client_reader.read(&mut buf)
+                client_reader.read(&mut pooled_buf)
             ).await;
             
             match read_result {
@@ -108,7 +113,6 @@ where
                         let delta = total_bytes - prev_total_bytes;
                         let rate = delta as f64 / elapsed.as_secs_f64();
                         
-                        // Changed to DEBUG to reduce log spam
                         debug!(
                             user = %user_c2s,
                             total_bytes = total_bytes,
@@ -121,7 +125,7 @@ where
                         prev_total_bytes = total_bytes;
                     }
                     
-                    if let Err(e) = server_writer.write_all(&buf[..n]).await {
+                    if let Err(e) = server_writer.write_all(&pooled_buf[..n]).await {
                         debug!(user = %user_c2s, error = %e, "Failed to write to server");
                         break;
                     }
@@ -142,7 +146,11 @@ where
     // Server -> Client task
     let s2c = tokio::spawn(async move {
         // Get buffer from pool
-        let mut buf = pool_s2c.get();
+        let mut pooled_buf = pool_s2c.get();
+        // CRITICAL FIX: Resize buffer
+        let cap = pooled_buf.capacity();
+        pooled_buf.resize(cap, 0);
+
         let mut total_bytes = 0u64;
         let mut prev_total_bytes = 0u64;
         let mut msg_count = 0u64;
@@ -152,7 +160,7 @@ where
         loop {
             let read_result = tokio::time::timeout(
                 activity_timeout,
-                server_reader.read(&mut buf)
+                server_reader.read(&mut pooled_buf)
             ).await;
             
             match read_result {
@@ -200,7 +208,6 @@ where
                         let delta = total_bytes - prev_total_bytes;
                         let rate = delta as f64 / elapsed.as_secs_f64();
                         
-                        // Changed to DEBUG to reduce log spam
                         debug!(
                             user = %user_s2c,
                             total_bytes = total_bytes,
@@ -213,7 +220,7 @@ where
                         prev_total_bytes = total_bytes;
                     }
                     
-                    if let Err(e) = client_writer.write_all(&buf[..n]).await {
+                    if let Err(e) = client_writer.write_all(&pooled_buf[..n]).await {
                         debug!(user = %user_s2c, error = %e, "Failed to write to client");
                         break;
                     }
