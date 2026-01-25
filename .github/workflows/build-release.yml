@@ -1,0 +1,113 @@
+name: telemt-build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 3.0.1)'
+        required: true
+
+env:
+  ARTIFACT_RETENTION_DAYS: '3'
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: 
+          - {
+              os: linux,
+              arch: x86,
+              libc: gnu,
+              target: i686-unknown-linux-gnu
+            }
+          - {
+              os: linux,
+              arch: x86_64,
+              libc: gnu,
+              target: x86_64-unknown-linux-gnu
+            }
+          - {
+              os: linux,
+              arch: armv6,
+              libc: gnu,
+              target: arm-unknown-linux-gnueabihf
+            }
+          - {
+              os: linux,
+              arch: armv7,
+              libc: gnu,
+              target: armv7-unknown-linux-gnueabihf
+            }
+          - {
+              os: linux,
+              arch: arm64,
+              libc: gnu,
+              target: aarch64-unknown-linux-gnu
+            }
+          - {
+              os: linux,
+              arch: powerpc64,
+              libc: gnu,
+              target: powerpc64-unknown-linux-gnu
+            }
+          - {
+              os: linux,
+              arch: powerpc64le,
+              libc: gnu,
+              target: powerpc64le-unknown-linux-gnu
+            }
+          - {
+              os: linux,
+              arch: riscv64,
+              libc: gnu,
+              target: riscv64gc-unknown-linux-gnu
+            }
+    steps:
+      - name: Checkout Telemt Source Code
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 1
+          path: ./
+
+      - name: Build Telemt
+        uses: houseabsolute/actions-rust-cross@v1
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        with:
+          command: build
+          target: ${{ matrix.platform.target }}
+          args: "--release --package telemt"
+          strip: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          path: ${{ github.workspace }}/target/${{ matrix.platform.target }}/release/telemt
+          name: telemt-${{ matrix.platform.arch }}-${{ matrix.platform.os }}-${{ matrix.platform.libc }}
+          if-no-files-found: error
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Tar Telemt
+        env:
+          ARCH: ${{ matrix.platform.arch }}
+        run: |
+          mkdir -p ${{ github.workspace }}/dist
+          cd ${{ github.workspace }}/target/${{ matrix.platform.target }}/release
+          tar -czvf ${{ github.workspace }}/dist/telemt-${{ matrix.platform.arch }}-${{ matrix.platform.os }}-${{ matrix.platform.libc }}.tar.gz telemt
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ github.token }}
+          file: ${{ github.workspace }}/dist/*
+          tag: ${{ github.event.inputs.version }}
+          file_glob: true
+          release_name: 'Release Telemt ${{ github.event.inputs.version }}'
+          overwrite: true
+          prerelease: false
+          body: 'Telemt statically linked version (GNU libc), built `${{ github.event.inputs.version }}`.'
