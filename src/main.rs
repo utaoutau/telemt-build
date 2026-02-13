@@ -6,8 +6,8 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::Semaphore;
-use tracing::{info, error, warn, debug};
-use tracing_subscriber::{fmt, EnvFilter, reload, prelude::*};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
 mod cli;
 mod config;
@@ -20,14 +20,14 @@ mod stream;
 mod transport;
 mod util;
 
-use crate::config::{ProxyConfig, LogLevel};
-use crate::proxy::ClientHandler;
-use crate::stats::{Stats, ReplayChecker};
+use crate::config::{LogLevel, ProxyConfig};
 use crate::crypto::SecureRandom;
-use crate::transport::{create_listener, ListenOptions, UpstreamManager};
-use crate::transport::middle_proxy::MePool;
-use crate::util::ip::detect_ip;
+use crate::proxy::ClientHandler;
+use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
+use crate::transport::middle_proxy::MePool;
+use crate::transport::{ListenOptions, UpstreamManager, create_listener};
+use crate::util::ip::detect_ip;
 
 fn parse_cli() -> (String, bool, Option<String>) {
     let mut config_path = "config.toml".to_string();
@@ -48,10 +48,14 @@ fn parse_cli() -> (String, bool, Option<String>) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--silent" | "-s" => { silent = true; }
+            "--silent" | "-s" => {
+                silent = true;
+            }
             "--log-level" => {
                 i += 1;
-                if i < args.len() { log_level = Some(args[i].clone()); }
+                if i < args.len() {
+                    log_level = Some(args[i].clone());
+                }
             }
             s if s.starts_with("--log-level=") => {
                 log_level = Some(s.trim_start_matches("--log-level=").to_string());
@@ -65,17 +69,27 @@ fn parse_cli() -> (String, bool, Option<String>) {
                 eprintln!("  --help, -h              Show this help");
                 eprintln!();
                 eprintln!("Setup (fire-and-forget):");
-                eprintln!("  --init                  Generate config, install systemd service, start");
+                eprintln!(
+                    "  --init                  Generate config, install systemd service, start"
+                );
                 eprintln!("    --port <PORT>          Listen port (default: 443)");
-                eprintln!("    --domain <DOMAIN>      TLS domain for masking (default: www.google.com)");
-                eprintln!("    --secret <HEX>         32-char hex secret (auto-generated if omitted)");
+                eprintln!(
+                    "    --domain <DOMAIN>      TLS domain for masking (default: www.google.com)"
+                );
+                eprintln!(
+                    "    --secret <HEX>         32-char hex secret (auto-generated if omitted)"
+                );
                 eprintln!("    --user <NAME>          Username (default: user)");
                 eprintln!("    --config-dir <DIR>     Config directory (default: /etc/telemt)");
                 eprintln!("    --no-start             Don't start the service after install");
                 std::process::exit(0);
             }
-            s if !s.starts_with('-') => { config_path = s.to_string(); }
-            other => { eprintln!("Unknown option: {}", other); }
+            s if !s.starts_with('-') => {
+                config_path = s.to_string();
+            }
+            other => {
+                eprintln!("Unknown option: {}", other);
+            }
         }
         i += 1;
     }
@@ -124,21 +138,30 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     info!("Telemt MTProxy v{}", env!("CARGO_PKG_VERSION"));
     info!("Log level: {}", effective_log_level);
-    info!("Modes: classic={} secure={} tls={}",
-        config.general.modes.classic,
-        config.general.modes.secure,
-        config.general.modes.tls);
+    info!(
+        "Modes: classic={} secure={} tls={}",
+        config.general.modes.classic, config.general.modes.secure, config.general.modes.tls
+    );
     info!("TLS domain: {}", config.censorship.tls_domain);
     if let Some(ref sock) = config.censorship.mask_unix_sock {
         info!("Mask: {} -> unix:{}", config.censorship.mask, sock);
         if !std::path::Path::new(sock).exists() {
-            warn!("Unix socket '{}' does not exist yet. Masking will fail until it appears.", sock);
+            warn!(
+                "Unix socket '{}' does not exist yet. Masking will fail until it appears.",
+                sock
+            );
         }
     } else {
-        info!("Mask: {} -> {}:{}",
+        info!(
+            "Mask: {} -> {}:{}",
             config.censorship.mask,
-            config.censorship.mask_host.as_deref().unwrap_or(&config.censorship.tls_domain),
-            config.censorship.mask_port);
+            config
+                .censorship
+                .mask_host
+                .as_deref()
+                .unwrap_or(&config.censorship.tls_domain),
+            config.censorship.mask_port
+        );
     }
 
     if config.censorship.tls_domain == "www.google.com" {
@@ -166,69 +189,78 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Middle Proxy initialization (if enabled)
     // =====================================================================
     let me_pool: Option<Arc<MePool>> = if use_middle_proxy {
-            info!("=== Middle Proxy Mode ===");
+        info!("=== Middle Proxy Mode ===");
 
-            // ad_tag (proxy_tag) for advertising
-            let proxy_tag = config.general.ad_tag.as_ref().map(|tag| {
-                hex::decode(tag).unwrap_or_else(|_| {
-                    warn!("Invalid ad_tag hex, middle proxy ad_tag will be empty");
-                    Vec::new()
-                })
-            });
+        // ad_tag (proxy_tag) for advertising
+        let proxy_tag = config.general.ad_tag.as_ref().map(|tag| {
+            hex::decode(tag).unwrap_or_else(|_| {
+                warn!("Invalid ad_tag hex, middle proxy ad_tag will be empty");
+                Vec::new()
+            })
+        });
 
-            // =============================================================
-            // CRITICAL: Download Telegram proxy-secret (NOT user secret!)
-            //
-            // C MTProxy uses TWO separate secrets:
-            //   -S flag    = 16-byte user secret for client obfuscation
-            //   --aes-pwd  = 32-512 byte binary file for ME RPC auth
-            //
-            // proxy-secret is from: https://core.telegram.org/getProxySecret
-            // =============================================================
-            let proxy_secret_path = config.general.proxy_secret_path.as_deref();
-            match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
-                Ok(proxy_secret) => {
-                    info!(
-                        secret_len = proxy_secret.len(),
-                        key_sig = format_args!("0x{:08x}",
-                            if proxy_secret.len() >= 4 {
-                                u32::from_le_bytes([proxy_secret[0], proxy_secret[1],
-                                                    proxy_secret[2], proxy_secret[3]])
-                            } else { 0 }),
-                        "Proxy-secret loaded"
-                    );
-
-                    let pool = MePool::new(proxy_tag, proxy_secret);
-
-                    match pool.init(2, &rng).await {
-                        Ok(()) => {
-                            info!("Middle-End pool initialized successfully");
-
-                            // Phase 4: Start health monitor
-                            let pool_clone = pool.clone();
-                            let rng_clone = rng.clone();
-                            tokio::spawn(async move {
-                                crate::transport::middle_proxy::me_health_monitor(
-                                    pool_clone, rng_clone, 2,
-                                ).await;
-                            });
-
-                            Some(pool)
+        // =============================================================
+        // CRITICAL: Download Telegram proxy-secret (NOT user secret!)
+        //
+        // C MTProxy uses TWO separate secrets:
+        //   -S flag    = 16-byte user secret for client obfuscation
+        //   --aes-pwd  = 32-512 byte binary file for ME RPC auth
+        //
+        // proxy-secret is from: https://core.telegram.org/getProxySecret
+        // =============================================================
+        let proxy_secret_path = config.general.proxy_secret_path.as_deref();
+        match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
+            Ok(proxy_secret) => {
+                info!(
+                    secret_len = proxy_secret.len(),
+                    key_sig = format_args!(
+                        "0x{:08x}",
+                        if proxy_secret.len() >= 4 {
+                            u32::from_le_bytes([
+                                proxy_secret[0],
+                                proxy_secret[1],
+                                proxy_secret[2],
+                                proxy_secret[3],
+                            ])
+                        } else {
+                            0
                         }
-                        Err(e) => {
-                            error!(error = %e, "Failed to initialize ME pool. Falling back to direct mode.");
-                            None
-                        }
+                    ),
+                    "Proxy-secret loaded"
+                );
+
+                let pool = MePool::new(proxy_tag, proxy_secret, config.general.middle_proxy_nat_ip);
+
+                match pool.init(2, &rng).await {
+                    Ok(()) => {
+                        info!("Middle-End pool initialized successfully");
+
+                        // Phase 4: Start health monitor
+                        let pool_clone = pool.clone();
+                        let rng_clone = rng.clone();
+                        tokio::spawn(async move {
+                            crate::transport::middle_proxy::me_health_monitor(
+                                pool_clone, rng_clone, 2,
+                            )
+                            .await;
+                        });
+
+                        Some(pool)
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to initialize ME pool. Falling back to direct mode.");
+                        None
                     }
                 }
-                Err(e) => {
-                    error!(error = %e, "Failed to fetch proxy-secret. Falling back to direct mode.");
-                    None
-                }
             }
-        } else {
-            None
-        };
+            Err(e) => {
+                error!(error = %e, "Failed to fetch proxy-secret. Falling back to direct mode.");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     if me_pool.is_some() {
         info!("Transport: Middle Proxy (supports all DCs including CDN)");
@@ -251,8 +283,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     info!("  IPv4 in use and IPv6 is fallback");
                 }
             } else {
-                let v6_works = upstream_result.v6_results.iter().any(|r| r.rtt_ms.is_some());
-                let v4_works = upstream_result.v4_results.iter().any(|r| r.rtt_ms.is_some());
+                let v6_works = upstream_result
+                    .v6_results
+                    .iter()
+                    .any(|r| r.rtt_ms.is_some());
+                let v4_works = upstream_result
+                    .v4_results
+                    .iter()
+                    .any(|r| r.rtt_ms.is_some());
                 if v6_works && !v4_works {
                     info!("  IPv6 only (IPv4 unavailable)");
                 } else if v4_works && !v6_works {
@@ -290,11 +328,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     Some(rtt) => {
                         // Align: IPv4 addresses are shorter, use more tabs
                         // 149.154.175.50:443 = ~18 chars
-                        info!("    DC{} [IPv4] {}:\t\t\t\t{:.0} ms", dc.dc_idx, addr_str, rtt);
+                        info!(
+                            "    DC{} [IPv4] {}:\t\t\t\t{:.0} ms",
+                            dc.dc_idx, addr_str, rtt
+                        );
                     }
                     None => {
                         let err = dc.error.as_deref().unwrap_or("fail");
-                        info!("    DC{} [IPv4] {}:\t\t\t\tFAIL ({})", dc.dc_idx, addr_str, err);
+                        info!(
+                            "    DC{} [IPv4] {}:\t\t\t\tFAIL ({})",
+                            dc.dc_idx, addr_str, err
+                        );
                     }
                 }
             }
@@ -305,13 +349,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Background tasks
     let um_clone = upstream_manager.clone();
-    tokio::spawn(async move { um_clone.run_health_checks(prefer_ipv6).await; });
+    tokio::spawn(async move {
+        um_clone.run_health_checks(prefer_ipv6).await;
+    });
 
     let rc_clone = replay_checker.clone();
-    tokio::spawn(async move { rc_clone.run_periodic_cleanup().await; });
+    tokio::spawn(async move {
+        rc_clone.run_periodic_cleanup().await;
+    });
 
     let detected_ip = detect_ip().await;
-    debug!("Detected IPs: v4={:?} v6={:?}", detected_ip.ipv4, detected_ip.ipv6);
+    debug!(
+        "Detected IPs: v4={:?} v6={:?}",
+        detected_ip.ipv4, detected_ip.ipv6
+    );
 
     let mut listeners = Vec::new();
 
@@ -345,17 +396,23 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         if let Some(secret) = config.access.users.get(user_name) {
                             info!("User: {}", user_name);
                             if config.general.modes.classic {
-                                info!("  Classic: tg://proxy?server={}&port={}&secret={}",
-                                    public_ip, config.server.port, secret);
+                                info!(
+                                    "  Classic: tg://proxy?server={}&port={}&secret={}",
+                                    public_ip, config.server.port, secret
+                                );
                             }
                             if config.general.modes.secure {
-                                info!("  DD:      tg://proxy?server={}&port={}&secret=dd{}",
-                                    public_ip, config.server.port, secret);
+                                info!(
+                                    "  DD:      tg://proxy?server={}&port={}&secret=dd{}",
+                                    public_ip, config.server.port, secret
+                                );
                             }
                             if config.general.modes.tls {
                                 let domain_hex = hex::encode(&config.censorship.tls_domain);
-                                info!("  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
-                                    public_ip, config.server.port, secret, domain_hex);
+                                info!(
+                                    "  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
+                                    public_ip, config.server.port, secret, domain_hex
+                                );
                             }
                         } else {
                             warn!("User '{}' in show_link not found", user_name);
@@ -365,7 +422,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
 
                 listeners.push(listener);
-            },
+            }
             Err(e) => {
                 error!("Failed to bind to {}: {}", addr, e);
             }
@@ -383,7 +440,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     } else {
         EnvFilter::new(effective_log_level.to_filter_str())
     };
-    filter_handle.reload(runtime_filter).expect("Failed to switch log filter");
+    filter_handle
+        .reload(runtime_filter)
+        .expect("Failed to switch log filter");
 
     for listener in listeners {
         let config = config.clone();
@@ -408,10 +467,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
                         tokio::spawn(async move {
                             if let Err(e) = ClientHandler::new(
-                                stream, peer_addr, config, stats,
-                                upstream_manager, replay_checker, buffer_pool, rng,
+                                stream,
+                                peer_addr,
+                                config,
+                                stats,
+                                upstream_manager,
+                                replay_checker,
+                                buffer_pool,
+                                rng,
                                 me_pool,
-                            ).run().await {
+                            )
+                            .run()
+                            .await
+                            {
                                 debug!(peer = %peer_addr, error = %e, "Connection error");
                             }
                         });

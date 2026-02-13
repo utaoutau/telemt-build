@@ -1,0 +1,431 @@
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use bytes::BytesMut;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::{Instant, timeout};
+use tracing::{debug, info, warn};
+
+use crate::crypto::{SecureRandom, derive_middleproxy_keys};
+use crate::error::{ProxyError, Result};
+use crate::protocol::constants::*;
+
+use super::ConnRegistry;
+use super::codec::{
+    RpcWriter, build_handshake_payload, build_nonce_payload, build_rpc_frame, cbc_decrypt_inplace,
+    cbc_encrypt_padded, parse_nonce_payload, read_rpc_frame_plaintext,
+};
+use super::reader::reader_loop;
+use super::wire::{IpMaterial, build_proxy_req_payload, extract_ip_material};
+
+pub struct MePool {
+    registry: Arc<ConnRegistry>,
+    writers: Arc<RwLock<Vec<Arc<Mutex<RpcWriter>>>>>,
+    rr: AtomicU64,
+    proxy_tag: Option<Vec<u8>>,
+    proxy_secret: Vec<u8>,
+    nat_ip: Option<IpAddr>,
+    pool_size: usize,
+}
+
+impl MePool {
+    pub fn new(
+        proxy_tag: Option<Vec<u8>>,
+        proxy_secret: Vec<u8>,
+        nat_ip: Option<IpAddr>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            registry: Arc::new(ConnRegistry::new()),
+            writers: Arc::new(RwLock::new(Vec::new())),
+            rr: AtomicU64::new(0),
+            proxy_tag,
+            proxy_secret,
+            nat_ip,
+            pool_size: 2,
+        })
+    }
+
+    pub fn has_proxy_tag(&self) -> bool {
+        self.proxy_tag.is_some()
+    }
+
+    pub fn translate_our_addr(&self, addr: SocketAddr) -> SocketAddr {
+        let ip = self.translate_ip_for_nat(addr.ip());
+        SocketAddr::new(ip, addr.port())
+    }
+
+    pub fn registry(&self) -> &Arc<ConnRegistry> {
+        &self.registry
+    }
+
+    fn translate_ip_for_nat(&self, ip: IpAddr) -> IpAddr {
+        let Some(nat_ip) = self.nat_ip else {
+            return ip;
+        };
+
+        match (ip, nat_ip) {
+            (IpAddr::V4(src), IpAddr::V4(dst))
+                if src.is_private() || src.is_loopback() || src.is_unspecified() =>
+            {
+                IpAddr::V4(dst)
+            }
+            (IpAddr::V6(src), IpAddr::V6(dst)) if src.is_loopback() || src.is_unspecified() => {
+                IpAddr::V6(dst)
+            }
+            (orig, _) => orig,
+        }
+    }
+
+    fn writers_arc(&self) -> Arc<RwLock<Vec<Arc<Mutex<RpcWriter>>>>> {
+        self.writers.clone()
+    }
+
+    fn key_selector(&self) -> u32 {
+        if self.proxy_secret.len() >= 4 {
+            u32::from_le_bytes([
+                self.proxy_secret[0],
+                self.proxy_secret[1],
+                self.proxy_secret[2],
+                self.proxy_secret[3],
+            ])
+        } else {
+            0
+        }
+    }
+
+    pub async fn init(self: &Arc<Self>, pool_size: usize, rng: &SecureRandom) -> Result<()> {
+        let addrs = &*TG_MIDDLE_PROXIES_FLAT_V4;
+        let ks = self.key_selector();
+        info!(
+            me_servers = addrs.len(),
+            pool_size,
+            key_selector = format_args!("0x{ks:08x}"),
+            secret_len = self.proxy_secret.len(),
+            "Initializing ME pool"
+        );
+
+        for &(ip, port) in addrs.iter() {
+            for i in 0..pool_size {
+                let addr = SocketAddr::new(ip, port);
+                match self.connect_one(addr, rng).await {
+                    Ok(()) => info!(%addr, idx = i, "ME connected"),
+                    Err(e) => warn!(%addr, idx = i, error = %e, "ME connect failed"),
+                }
+            }
+            if self.writers.read().await.len() >= pool_size {
+                break;
+            }
+        }
+
+        if self.writers.read().await.is_empty() {
+            return Err(ProxyError::Proxy("No ME connections".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn connect_one(
+        self: &Arc<Self>,
+        addr: SocketAddr,
+        rng: &SecureRandom,
+    ) -> Result<()> {
+        let secret = &self.proxy_secret;
+        if secret.len() < 32 {
+            return Err(ProxyError::Proxy(
+                "proxy-secret too short for ME auth".into(),
+            ));
+        }
+
+        let stream = timeout(
+            Duration::from_secs(ME_CONNECT_TIMEOUT_SECS),
+            TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| ProxyError::ConnectionTimeout {
+            addr: addr.to_string(),
+        })?
+        .map_err(ProxyError::Io)?;
+        stream.set_nodelay(true).ok();
+
+        let local_addr = stream.local_addr().map_err(ProxyError::Io)?;
+        let peer_addr = stream.peer_addr().map_err(ProxyError::Io)?;
+        let local_addr_nat = self.translate_our_addr(local_addr);
+        let peer_addr_nat =
+            SocketAddr::new(self.translate_ip_for_nat(peer_addr.ip()), peer_addr.port());
+        let (mut rd, mut wr) = tokio::io::split(stream);
+
+        let my_nonce: [u8; 16] = rng.bytes(16).try_into().unwrap();
+        let crypto_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+
+        let ks = self.key_selector();
+        let nonce_payload = build_nonce_payload(ks, crypto_ts, &my_nonce);
+        let nonce_frame = build_rpc_frame(-2, &nonce_payload);
+        wr.write_all(&nonce_frame).await.map_err(ProxyError::Io)?;
+        wr.flush().await.map_err(ProxyError::Io)?;
+
+        let (srv_seq, srv_nonce_payload) = timeout(
+            Duration::from_secs(ME_HANDSHAKE_TIMEOUT_SECS),
+            read_rpc_frame_plaintext(&mut rd),
+        )
+        .await
+        .map_err(|_| ProxyError::TgHandshakeTimeout)??;
+
+        if srv_seq != -2 {
+            return Err(ProxyError::InvalidHandshake(format!(
+                "Expected seq=-2, got {srv_seq}"
+            )));
+        }
+
+        let (schema, srv_ts, srv_nonce) = parse_nonce_payload(&srv_nonce_payload)?;
+        if schema != RPC_CRYPTO_AES_U32 {
+            return Err(ProxyError::InvalidHandshake(format!(
+                "Unsupported crypto schema: 0x{schema:x}"
+            )));
+        }
+
+        let skew = crypto_ts.abs_diff(srv_ts);
+        if skew > 30 {
+            return Err(ProxyError::InvalidHandshake(format!(
+                "nonce crypto_ts skew too large: client={crypto_ts}, server={srv_ts}, skew={skew}s"
+            )));
+        }
+
+        let ts_bytes = crypto_ts.to_le_bytes();
+        let server_port_bytes = peer_addr_nat.port().to_le_bytes();
+        let client_port_bytes = local_addr_nat.port().to_le_bytes();
+
+        let server_ip = extract_ip_material(peer_addr_nat);
+        let client_ip = extract_ip_material(local_addr_nat);
+
+        let (srv_ip_opt, clt_ip_opt, clt_v6_opt, srv_v6_opt, hs_our_ip, hs_peer_ip) =
+            match (server_ip, client_ip) {
+                (IpMaterial::V4(srv), IpMaterial::V4(clt)) => {
+                    (Some(srv), Some(clt), None, None, clt, srv)
+                }
+                (IpMaterial::V6(srv), IpMaterial::V6(clt)) => {
+                    let zero = [0u8; 4];
+                    (None, None, Some(clt), Some(srv), zero, zero)
+                }
+                _ => {
+                    return Err(ProxyError::InvalidHandshake(
+                        "mixed IPv4/IPv6 endpoints are not supported for ME key derivation"
+                            .to_string(),
+                    ));
+                }
+            };
+
+        let (wk, wi) = derive_middleproxy_keys(
+            &srv_nonce,
+            &my_nonce,
+            &ts_bytes,
+            srv_ip_opt.as_ref().map(|x| &x[..]),
+            &client_port_bytes,
+            b"CLIENT",
+            clt_ip_opt.as_ref().map(|x| &x[..]),
+            &server_port_bytes,
+            secret,
+            clt_v6_opt.as_ref(),
+            srv_v6_opt.as_ref(),
+        );
+        let (rk, ri) = derive_middleproxy_keys(
+            &srv_nonce,
+            &my_nonce,
+            &ts_bytes,
+            srv_ip_opt.as_ref().map(|x| &x[..]),
+            &client_port_bytes,
+            b"SERVER",
+            clt_ip_opt.as_ref().map(|x| &x[..]),
+            &server_port_bytes,
+            secret,
+            clt_v6_opt.as_ref(),
+            srv_v6_opt.as_ref(),
+        );
+
+        let hs_payload =
+            build_handshake_payload(hs_our_ip, local_addr.port(), hs_peer_ip, peer_addr.port());
+        let hs_frame = build_rpc_frame(-1, &hs_payload);
+        let (encrypted_hs, write_iv) = cbc_encrypt_padded(&wk, &wi, &hs_frame)?;
+        wr.write_all(&encrypted_hs).await.map_err(ProxyError::Io)?;
+        wr.flush().await.map_err(ProxyError::Io)?;
+
+        let deadline = Instant::now() + Duration::from_secs(ME_HANDSHAKE_TIMEOUT_SECS);
+        let mut enc_buf = BytesMut::with_capacity(256);
+        let mut dec_buf = BytesMut::with_capacity(256);
+        let mut read_iv = ri;
+        let mut handshake_ok = false;
+
+        while Instant::now() < deadline && !handshake_ok {
+            let remaining = deadline - Instant::now();
+            let mut tmp = [0u8; 256];
+            let n = match timeout(remaining, rd.read(&mut tmp)).await {
+                Ok(Ok(0)) => {
+                    return Err(ProxyError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "ME closed during handshake",
+                    )));
+                }
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => return Err(ProxyError::Io(e)),
+                Err(_) => return Err(ProxyError::TgHandshakeTimeout),
+            };
+
+            enc_buf.extend_from_slice(&tmp[..n]);
+
+            let blocks = enc_buf.len() / 16 * 16;
+            if blocks > 0 {
+                let mut chunk = vec![0u8; blocks];
+                chunk.copy_from_slice(&enc_buf[..blocks]);
+                read_iv = cbc_decrypt_inplace(&rk, &read_iv, &mut chunk)?;
+                dec_buf.extend_from_slice(&chunk);
+                let _ = enc_buf.split_to(blocks);
+            }
+
+            while dec_buf.len() >= 4 {
+                let fl = u32::from_le_bytes(dec_buf[0..4].try_into().unwrap()) as usize;
+
+                if fl == 4 {
+                    let _ = dec_buf.split_to(4);
+                    continue;
+                }
+                if !(12..=(1 << 24)).contains(&fl) {
+                    return Err(ProxyError::InvalidHandshake(format!(
+                        "Bad HS response frame len: {fl}"
+                    )));
+                }
+                if dec_buf.len() < fl {
+                    break;
+                }
+
+                let frame = dec_buf.split_to(fl);
+                let pe = fl - 4;
+                let ec = u32::from_le_bytes(frame[pe..pe + 4].try_into().unwrap());
+                let ac = crate::crypto::crc32(&frame[..pe]);
+                if ec != ac {
+                    return Err(ProxyError::InvalidHandshake(format!(
+                        "HS CRC mismatch: 0x{ec:08x} vs 0x{ac:08x}"
+                    )));
+                }
+
+                let hs_type = u32::from_le_bytes(frame[8..12].try_into().unwrap());
+                if hs_type == RPC_HANDSHAKE_ERROR_U32 {
+                    let err_code = if frame.len() >= 16 {
+                        i32::from_le_bytes(frame[12..16].try_into().unwrap())
+                    } else {
+                        -1
+                    };
+                    return Err(ProxyError::InvalidHandshake(format!(
+                        "ME rejected handshake (error={err_code})"
+                    )));
+                }
+                if hs_type != RPC_HANDSHAKE_U32 {
+                    return Err(ProxyError::InvalidHandshake(format!(
+                        "Expected HANDSHAKE 0x{RPC_HANDSHAKE_U32:08x}, got 0x{hs_type:08x}"
+                    )));
+                }
+
+                handshake_ok = true;
+                break;
+            }
+        }
+
+        if !handshake_ok {
+            return Err(ProxyError::TgHandshakeTimeout);
+        }
+
+        info!(%addr, "RPC handshake OK");
+
+        let rpc_w = Arc::new(Mutex::new(RpcWriter {
+            writer: wr,
+            key: wk,
+            iv: write_iv,
+            seq_no: 0,
+        }));
+        self.writers.write().await.push(rpc_w.clone());
+
+        let reg = self.registry.clone();
+        let w_pong = rpc_w.clone();
+        let w_pool = self.writers_arc();
+        tokio::spawn(async move {
+            if let Err(e) =
+                reader_loop(rd, rk, read_iv, reg, enc_buf, dec_buf, w_pong.clone()).await
+            {
+                warn!(error = %e, "ME reader ended");
+            }
+            let mut ws = w_pool.write().await;
+            ws.retain(|w| !Arc::ptr_eq(w, &w_pong));
+            info!(remaining = ws.len(), "Dead ME writer removed from pool");
+        });
+
+        Ok(())
+    }
+
+    pub async fn send_proxy_req(
+        &self,
+        conn_id: u64,
+        client_addr: SocketAddr,
+        our_addr: SocketAddr,
+        data: &[u8],
+        proto_flags: u32,
+    ) -> Result<()> {
+        let payload = build_proxy_req_payload(
+            conn_id,
+            client_addr,
+            our_addr,
+            data,
+            self.proxy_tag.as_deref(),
+            proto_flags,
+        );
+
+        loop {
+            let ws = self.writers.read().await;
+            if ws.is_empty() {
+                return Err(ProxyError::Proxy("All ME connections dead".into()));
+            }
+
+            let idx = self.rr.fetch_add(1, Ordering::Relaxed) as usize % ws.len();
+            let w = ws[idx].clone();
+            drop(ws);
+
+            match w.lock().await.send(&payload).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!(error = %e, "ME write failed, removing dead conn");
+                    let mut ws = self.writers.write().await;
+                    ws.retain(|o| !Arc::ptr_eq(o, &w));
+                    if ws.is_empty() {
+                        return Err(ProxyError::Proxy("All ME connections dead".into()));
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn send_close(&self, conn_id: u64) -> Result<()> {
+        let ws = self.writers.read().await;
+        if !ws.is_empty() {
+            let w = ws[0].clone();
+            drop(ws);
+            let mut p = Vec::with_capacity(12);
+            p.extend_from_slice(&RPC_CLOSE_EXT_U32.to_le_bytes());
+            p.extend_from_slice(&conn_id.to_le_bytes());
+            if let Err(e) = w.lock().await.send(&p).await {
+                debug!(error = %e, "ME close write failed");
+                let mut ws = self.writers.write().await;
+                ws.retain(|o| !Arc::ptr_eq(o, &w));
+            }
+        }
+
+        self.registry.unregister(conn_id).await;
+        Ok(())
+    }
+
+    pub fn connection_count(&self) -> usize {
+        self.writers.try_read().map(|w| w.len()).unwrap_or(0)
+    }
+}
