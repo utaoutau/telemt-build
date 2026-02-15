@@ -22,7 +22,9 @@
 use_middle_proxy = true
 ```
 
-в версии `telemt` 3.0.0 и последующих.
+в версии `telemt` 3.0.0 и последующих, при выполнении любого набора условий:
+- публичный IP для исходящих соединений установлен на интерфейса инстанса с `telemt`
+- вы используете NAT 1:1 + включили STUN-пробинг
 
 Если у вас есть компетенции в асинхронных сетевых приложениях, анализе трафика, реверс-инжиниринге или сетевых расследованиях — мы открыты к идеям и pull requests.
 
@@ -42,7 +44,9 @@ To use it, set:
 ```toml
 use_middle_proxy = true
 ```
-in version `telemt` 3.0.0 or later.
+in version `telemt` 3.0.0 or later, if any set of conditions is met:
+- public IP for outgoing connections is set on the instance interface with `telemt`
+- you are using NAT 1:1 + enabled STUN-probe
 
 If you have expertise in asynchronous network applications, traffic analysis, reverse engineering, or network forensics — we welcome ideas, suggestions, and pull requests.
 
