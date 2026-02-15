@@ -357,7 +357,9 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
 
     info!("================= Telegram DC Connectivity =================");
 
-    let ping_results = upstream_manager.ping_all_dcs(prefer_ipv6).await;
+    let ping_results = upstream_manager
+        .ping_all_dcs(prefer_ipv6, &config.dc_overrides)
+        .await;
 
 	for upstream_result in &ping_results {
 		let v6_works = upstream_result
