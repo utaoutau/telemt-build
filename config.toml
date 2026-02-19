@@ -7,7 +7,13 @@ use_middle_proxy = true
 proxy_secret_path = "proxy-secret"
 # disable_colors = false  # Disable colored output in logs (useful for files/systemd)
 
-# === Middle Proxy (ME) ===
+# === Log Level ===
+# Log level: debug | verbose | normal | silent
+# Can be overridden with --silent or --log-level CLI flags
+# RUST_LOG env var takes absolute priority over all of these
+log_level = "normal"
+
+# === Middle Proxy - ME ===
 # Public IP override for ME KDF when behind NAT; leave unset to auto-detect.
 # middle_proxy_nat_ip = "203.0.113.10"
 # Enable STUN probing to discover public IP:port for ME.
@@ -37,6 +43,19 @@ me_reconnect_backoff_base_ms = 500        # Backoff start
 me_reconnect_backoff_cap_ms = 30000       # Backoff cap
 me_reconnect_fast_retry_count = 11        # Quick retries before backoff
 
+[general.modes]
+classic = false
+secure = false
+tls = true
+
+[general.links]
+show = "*"
+# show = ["alice", "bob"] # Only show links for alice and bob
+# show = "*"              # Show links for all users
+# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
+# public_port = 443                  # Port for tg:// links (default: server.port)
+
+# === Network Parameters ===
 [network]
 # Enable/disable families: true/false/auto(None)
 ipv4 = true
@@ -44,16 +63,6 @@ ipv6 = false # UNSTABLE WITH ME
 # prefer = 4 or 6
 prefer = 4
 multipath = false # EXPERIMENTAL!
-
-# Log level: debug | verbose | normal | silent
-# Can be overridden with --silent or --log-level CLI flags
-# RUST_LOG env var takes absolute priority over all of these
-log_level = "normal"
-
-[general.modes]
-classic = false
-secure = false
-tls = true
 
 # === Server Binding ===
 [server]
@@ -65,21 +74,13 @@ listen_addr_ipv6 = "::"
 # metrics_port = 9090
 # metrics_whitelist = ["127.0.0.1", "::1"]
 
-# Listen on multiple interfaces/IPs (overrides listen_addr_*)
+# Listen on multiple interfaces/IPs - IPv4
 [[server.listeners]]
 ip = "0.0.0.0"
-# announce_ip = "1.2.3.4" # Optional: Public IP for tg:// links
 
+# Listen on multiple interfaces/IPs - IPv6
 [[server.listeners]]
 ip = "::"
-
-# Users to show in the startup log (tg:// links)
-[general.links]
-show = ["hello"]          # Only show links for user "hello"
-# show = ["alice", "bob"] # Only show links for alice and bob
-# show = "*"              # Show links for all users
-# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
-# public_port = 443                  # Port for tg:// links (default: server.port)
 
 # === Timeouts (in seconds) ===
 [timeouts]
