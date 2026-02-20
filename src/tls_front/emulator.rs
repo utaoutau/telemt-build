@@ -44,7 +44,8 @@ pub fn build_emulated_server_hello(
     message.extend_from_slice(&[0u8; 32]); // random placeholder
     message.push(session_id.len() as u8);
     message.extend_from_slice(session_id);
-    message.extend_from_slice(&cached.server_hello_template.cipher_suite);
+    // Always use TLS_AES_128_GCM_SHA256 (0x1301) to match Telegram client's offer set.
+    message.extend_from_slice(&[0x13, 0x01]);
     message.push(cached.server_hello_template.compression);
     message.extend_from_slice(&extensions_len.to_be_bytes());
     message.extend_from_slice(&extensions);
