@@ -470,19 +470,6 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
     // Freeze config after possible fallback decision
     let config = Arc::new(config);
 
-    // ── Hot-reload watcher ────────────────────────────────────────────────
-    // Spawns a background task that watches the config file and reloads it
-    // on SIGHUP (Unix) or every 60 seconds.  Each accept-loop clones the
-    // receiver and calls `.borrow_and_update().clone()` per connection.
-    let (config_rx, mut log_level_rx): (
-        tokio::sync::watch::Receiver<Arc<ProxyConfig>>,
-        tokio::sync::watch::Receiver<LogLevel>,
-    ) = spawn_config_watcher(
-        std::path::PathBuf::from(&config_path),
-        config.clone(),
-        std::time::Duration::from_secs(60),
-    );
-
     let replay_checker = Arc::new(ReplayChecker::new(
         config.access.replay_check_len,
         Duration::from_secs(config.access.replay_window_secs),
@@ -670,6 +657,19 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         detected_ip_v4, detected_ip_v6
     );
 
+    // ── Hot-reload watcher ────────────────────────────────────────────────
+    // Uses inotify to detect file changes instantly (SIGHUP also works).
+    // detected_ip_v4/v6 are passed so newly added users get correct TG links.
+    let (config_rx, mut log_level_rx): (
+        tokio::sync::watch::Receiver<Arc<ProxyConfig>>,
+        tokio::sync::watch::Receiver<LogLevel>,
+    ) = spawn_config_watcher(
+        std::path::PathBuf::from(&config_path),
+        config.clone(),
+        detected_ip_v4,
+        detected_ip_v6,
+    );
+
     let mut listeners = Vec::new();
 
     for listener_conf in &config.server.listeners {
@@ -793,7 +793,6 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                         let conn_id = unix_conn_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let fake_peer = SocketAddr::from(([127, 0, 0, 1], (conn_id % 65535) as u16));
 
-                        // Pick up the latest config atomically for this connection.
                         let config = config_rx_unix.borrow_and_update().clone();
                         let stats = stats.clone();
                         let upstream_manager = upstream_manager.clone();
@@ -828,7 +827,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         std::process::exit(1);
     }
 
-    // Switch to user-configured log level after startup (before starting listeners)
+    // Switch to user-configured log level after startup
     let runtime_filter = if has_rust_log {
         EnvFilter::from_default_env()
     } else if matches!(effective_log_level, LogLevel::Silent) {
@@ -840,9 +839,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         .reload(runtime_filter)
         .expect("Failed to switch log filter");
 
-    // Apply log_level changes to the tracing reload handle.
-    // Note: the initial runtime_filter is applied below (after startup); this
-    // task handles subsequent hot-reload changes only.
+    // Apply log_level changes from hot-reload to the tracing filter.
     tokio::spawn(async move {
         loop {
             if log_level_rx.changed().await.is_err() {
@@ -879,7 +876,6 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
             loop {
                 match listener.accept().await {
                     Ok((stream, peer_addr)) => {
-                        // Pick up the latest config atomically for this connection.
                         let config = config_rx.borrow_and_update().clone();
                         let stats = stats.clone();
                         let upstream_manager = upstream_manager.clone();
