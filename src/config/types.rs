@@ -74,8 +74,8 @@ pub struct ProxyModes {
 impl Default for ProxyModes {
     fn default() -> Self {
         Self {
-            classic: true,
-            secure: true,
+            classic: false,
+            secure: false,
             tls: true,
         }
     }
@@ -118,7 +118,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             ipv4: true,
-            ipv6: false,
+            ipv6: Some(false),
             prefer: 4,
             multipath: false,
             stun_servers: default_stun_servers(),
