@@ -162,21 +162,12 @@ pub fn is_valid_secure_payload_len(data_len: usize) -> bool {
 }
 
 /// Compute Secure Intermediate payload length from wire length.
-///
-/// Returns `None` for invalid Secure lengths (e.g. divisible by 4).
+/// Secure mode strips up to 3 random tail bytes by truncating to 4-byte boundary.
 pub fn secure_payload_len_from_wire_len(wire_len: usize) -> Option<usize> {
     if wire_len < 4 {
         return None;
     }
-    let padding_len = wire_len % 4;
-    if padding_len == 0 || wire_len < padding_len {
-        return None;
-    }
-    let payload_len = wire_len - padding_len;
-    if !is_valid_secure_payload_len(payload_len) {
-        return None;
-    }
-    Some(payload_len)
+    Some(wire_len - (wire_len % 4))
 }
 
 /// Generate padding length for Secure Intermediate protocol.
@@ -383,7 +374,7 @@ mod tests {
     #[test]
     fn secure_wire_len_roundtrip_for_aligned_payload() {
         for payload_len in (4..4096).step_by(4) {
-            for padding in 1..=3usize {
+            for padding in 0..=3usize {
                 let wire_len = payload_len + padding;
                 let recovered = secure_payload_len_from_wire_len(wire_len);
                 assert_eq!(recovered, Some(payload_len));
@@ -392,9 +383,10 @@ mod tests {
     }
 
     #[test]
-    fn secure_wire_len_rejects_aligned_totals() {
-        for wire_len in (0..1024).step_by(4) {
-            assert_eq!(secure_payload_len_from_wire_len(wire_len), None);
-        }
+    fn secure_wire_len_rejects_too_short_frames() {
+        assert_eq!(secure_payload_len_from_wire_len(0), None);
+        assert_eq!(secure_payload_len_from_wire_len(1), None);
+        assert_eq!(secure_payload_len_from_wire_len(2), None);
+        assert_eq!(secure_payload_len_from_wire_len(3), None);
     }
 }
