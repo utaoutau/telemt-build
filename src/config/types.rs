@@ -331,7 +331,7 @@ impl Default for GeneralConfig {
             me_warmup_stagger_enabled: true,
             me_warmup_step_delay_ms: default_warmup_step_delay_ms(),
             me_warmup_step_jitter_ms: default_warmup_step_jitter_ms(),
-            me_reconnect_max_concurrent_per_dc: 11,
+            me_reconnect_max_concurrent_per_dc: 8,
             me_reconnect_backoff_base_ms: default_reconnect_backoff_base_ms(),
             me_reconnect_backoff_cap_ms: default_reconnect_backoff_cap_ms(),
             me_reconnect_fast_retry_count: 8,
