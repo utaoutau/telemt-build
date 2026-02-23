@@ -418,23 +418,14 @@ async fn fetch_via_raw_tls(
     })
 }
 
-/// Fetch real TLS metadata for the given SNI: negotiated cipher and cert lengths.
-pub async fn fetch_real_tls(
+async fn fetch_via_rustls(
     host: &str,
     port: u16,
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
 ) -> Result<TlsFetchResult> {
-    // Preferred path: raw TLS probe for accurate record sizing
-    match fetch_via_raw_tls(host, port, sni, connect_timeout).await {
-        Ok(res) => return Ok(res),
-        Err(e) => {
-            warn!(sni = %sni, error = %e, "Raw TLS fetch failed, falling back to rustls");
-        }
-    }
-
-    // Fallback: rustls handshake to at least get certificate sizes
+    // rustls handshake path for certificate and basic negotiated metadata.
     let stream = if let Some(manager) = upstream {
         // Resolve host to SocketAddr
         if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
@@ -522,6 +513,49 @@ pub async fn fetch_real_tls(
         cert_info,
         cert_payload,
     })
+}
+
+/// Fetch real TLS metadata for the given SNI.
+///
+/// Strategy:
+/// 1) Probe raw TLS for realistic ServerHello and ApplicationData record sizes.
+/// 2) Fetch certificate chain via rustls to build cert payload.
+/// 3) Merge both when possible; otherwise auto-fallback to whichever succeeded.
+pub async fn fetch_real_tls(
+    host: &str,
+    port: u16,
+    sni: &str,
+    connect_timeout: Duration,
+    upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+) -> Result<TlsFetchResult> {
+    let raw_result = match fetch_via_raw_tls(host, port, sni, connect_timeout).await {
+        Ok(res) => Some(res),
+        Err(e) => {
+            warn!(sni = %sni, error = %e, "Raw TLS fetch failed");
+            None
+        }
+    };
+
+    match fetch_via_rustls(host, port, sni, connect_timeout, upstream).await {
+        Ok(rustls_result) => {
+            if let Some(mut raw) = raw_result {
+                raw.cert_info = rustls_result.cert_info;
+                raw.cert_payload = rustls_result.cert_payload;
+                debug!(sni = %sni, "Fetched TLS metadata via raw probe + rustls cert chain");
+                Ok(raw)
+            } else {
+                Ok(rustls_result)
+            }
+        }
+        Err(e) => {
+            if let Some(raw) = raw_result {
+                warn!(sni = %sni, error = %e, "Rustls cert fetch failed, using raw TLS metadata only");
+                Ok(raw)
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
