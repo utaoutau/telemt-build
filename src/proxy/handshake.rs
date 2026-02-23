@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, warn, trace, info};
 use zeroize::Zeroize;
@@ -118,7 +119,13 @@ where
                 config.censorship.tls_domain.clone()
             };
             let cached_entry = cache.get(&selected_domain).await;
-            let use_full_cert_payload = cache.take_full_cert_budget(&selected_domain).await;
+            let use_full_cert_payload = cache
+                .take_full_cert_budget_for_ip(
+                    &selected_domain,
+                    peer.ip(),
+                    Duration::from_secs(config.censorship.tls_full_cert_ttl_secs),
+                )
+                .await;
             Some((cached_entry, use_full_cert_payload))
         } else {
             None
