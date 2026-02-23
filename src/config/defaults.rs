@@ -82,7 +82,7 @@ pub(crate) fn default_unknown_dc_log_path() -> Option<String> {
 }
 
 pub(crate) fn default_pool_size() -> usize {
-    2
+    8
 }
 
 pub(crate) fn default_keepalive_interval() -> u64 {
@@ -163,11 +163,11 @@ pub(crate) fn default_cache_public_ip_path() -> String {
 }
 
 pub(crate) fn default_proxy_secret_reload_secs() -> u64 {
-    12 * 60 * 60
+    2 * 60 * 60
 }
 
 pub(crate) fn default_proxy_config_reload_secs() -> u64 {
-    12 * 60 * 60
+    2 * 60 * 60
 }
 
 pub(crate) fn default_update_every_secs() -> u64 {
@@ -187,7 +187,7 @@ pub(crate) fn default_me_pool_min_fresh_ratio() -> f32 {
 }
 
 pub(crate) fn default_hardswap() -> bool {
-    false
+    true
 }
 
 pub(crate) fn default_ntp_check() -> bool {
