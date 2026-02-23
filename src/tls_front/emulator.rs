@@ -27,6 +27,33 @@ fn jitter_and_clamp_sizes(sizes: &[usize], rng: &SecureRandom) -> Vec<usize> {
         .collect()
 }
 
+fn ensure_payload_capacity(mut sizes: Vec<usize>, payload_len: usize) -> Vec<usize> {
+    if payload_len == 0 {
+        return sizes;
+    }
+
+    let mut total = sizes.iter().sum::<usize>();
+    if total >= payload_len {
+        return sizes;
+    }
+
+    if let Some(last) = sizes.last_mut() {
+        let free = MAX_APP_DATA.saturating_sub(*last);
+        let grow = free.min(payload_len - total);
+        *last += grow;
+        total += grow;
+    }
+
+    while total < payload_len {
+        let remaining = payload_len - total;
+        let chunk = remaining.min(MAX_APP_DATA).max(MIN_APP_DATA);
+        sizes.push(chunk);
+        total += chunk;
+    }
+
+    sizes
+}
+
 /// Build a ServerHello + CCS + ApplicationData sequence using cached TLS metadata.
 pub fn build_emulated_server_hello(
     secret: &[u8],
@@ -109,21 +136,44 @@ pub fn build_emulated_server_hello(
     if sizes.is_empty() {
         sizes.push(cached.total_app_data_len.max(1024));
     }
-    let sizes = jitter_and_clamp_sizes(&sizes, rng);
+    let mut sizes = jitter_and_clamp_sizes(&sizes, rng);
+    let cert_payload = cached
+        .cert_payload
+        .as_ref()
+        .map(|payload| payload.certificate_message.as_slice())
+        .filter(|payload| !payload.is_empty());
+
+    if let Some(payload) = cert_payload {
+        sizes = ensure_payload_capacity(sizes, payload.len());
+    }
 
     let mut app_data = Vec::new();
+    let mut payload_offset = 0usize;
     for size in sizes {
         let mut rec = Vec::with_capacity(5 + size);
         rec.push(TLS_RECORD_APPLICATION);
         rec.extend_from_slice(&TLS_VERSION);
         rec.extend_from_slice(&(size as u16).to_be_bytes());
-        if size > 17 {
-            let body_len = size - 17;
-            rec.extend_from_slice(&rng.bytes(body_len));
-            rec.push(0x16); // inner content type marker (handshake)
-            rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
+
+        if let Some(payload) = cert_payload {
+            let remaining = payload.len().saturating_sub(payload_offset);
+            let copy_len = remaining.min(size);
+            if copy_len > 0 {
+                rec.extend_from_slice(&payload[payload_offset..payload_offset + copy_len]);
+                payload_offset += copy_len;
+            }
+            if size > copy_len {
+                rec.extend_from_slice(&rng.bytes(size - copy_len));
+            }
         } else {
-            rec.extend_from_slice(&rng.bytes(size));
+            if size > 17 {
+                let body_len = size - 17;
+                rec.extend_from_slice(&rng.bytes(body_len));
+                rec.push(0x16); // inner content type marker (handshake)
+                rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
+            } else {
+                rec.extend_from_slice(&rng.bytes(size));
+            }
         }
         app_data.extend_from_slice(&rec);
     }
@@ -157,4 +207,93 @@ pub fn build_emulated_server_hello(
     response[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN].copy_from_slice(&digest);
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use crate::tls_front::types::{CachedTlsData, ParsedServerHello, TlsCertPayload};
+
+    use super::build_emulated_server_hello;
+    use crate::crypto::SecureRandom;
+    use crate::protocol::constants::{
+        TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
+    };
+
+    fn first_app_data_payload(response: &[u8]) -> &[u8] {
+        let hello_len = u16::from_be_bytes([response[3], response[4]]) as usize;
+        let ccs_start = 5 + hello_len;
+        let ccs_len = u16::from_be_bytes([response[ccs_start + 3], response[ccs_start + 4]]) as usize;
+        let app_start = ccs_start + 5 + ccs_len;
+        let app_len = u16::from_be_bytes([response[app_start + 3], response[app_start + 4]]) as usize;
+        &response[app_start + 5..app_start + 5 + app_len]
+    }
+
+    fn make_cached(cert_payload: Option<TlsCertPayload>) -> CachedTlsData {
+        CachedTlsData {
+            server_hello_template: ParsedServerHello {
+                version: [0x03, 0x03],
+                random: [0u8; 32],
+                session_id: Vec::new(),
+                cipher_suite: [0x13, 0x01],
+                compression: 0,
+                extensions: Vec::new(),
+            },
+            cert_info: None,
+            cert_payload,
+            app_data_records_sizes: vec![64],
+            total_app_data_len: 64,
+            fetched_at: SystemTime::now(),
+            domain: "example.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_build_emulated_server_hello_uses_cached_cert_payload() {
+        let cert_msg = vec![0x0b, 0x00, 0x00, 0x05, 0x00, 0xaa, 0xbb, 0xcc, 0xdd];
+        let cached = make_cached(Some(TlsCertPayload {
+            cert_chain_der: vec![vec![0x30, 0x01, 0x00]],
+            certificate_message: cert_msg.clone(),
+        }));
+        let rng = SecureRandom::new();
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0x11; 32],
+            &[0x22; 16],
+            &cached,
+            &rng,
+            None,
+            0,
+        );
+
+        assert_eq!(response[0], TLS_RECORD_HANDSHAKE);
+        let hello_len = u16::from_be_bytes([response[3], response[4]]) as usize;
+        let ccs_start = 5 + hello_len;
+        assert_eq!(response[ccs_start], TLS_RECORD_CHANGE_CIPHER);
+        let app_start = ccs_start + 6;
+        assert_eq!(response[app_start], TLS_RECORD_APPLICATION);
+
+        let payload = first_app_data_payload(&response);
+        assert!(payload.starts_with(&cert_msg));
+    }
+
+    #[test]
+    fn test_build_emulated_server_hello_random_fallback_when_no_cert_payload() {
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0x22; 32],
+            &[0x33; 16],
+            &cached,
+            &rng,
+            None,
+            0,
+        );
+
+        let payload = first_app_data_payload(&response);
+        assert_eq!(payload.len(), 64);
+        assert_eq!(payload[payload.len() - 17], 0x16);
+    }
 }

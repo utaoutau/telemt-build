@@ -19,7 +19,13 @@ use x509_parser::certificate::X509Certificate;
 
 use crate::crypto::SecureRandom;
 use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE};
-use crate::tls_front::types::{ParsedServerHello, TlsExtension, TlsFetchResult, ParsedCertificateInfo};
+use crate::tls_front::types::{
+    ParsedCertificateInfo,
+    ParsedServerHello,
+    TlsCertPayload,
+    TlsExtension,
+    TlsFetchResult,
+};
 
 /// No-op verifier: accept any certificate (we only need lengths and metadata).
 #[derive(Debug)]
@@ -315,6 +321,46 @@ fn parse_cert_info(certs: &[CertificateDer<'static>]) -> Option<ParsedCertificat
     })
 }
 
+fn u24_bytes(value: usize) -> Option<[u8; 3]> {
+    if value > 0x00ff_ffff {
+        return None;
+    }
+    Some([
+        ((value >> 16) & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8,
+        (value & 0xff) as u8,
+    ])
+}
+
+fn encode_tls13_certificate_message(cert_chain_der: &[Vec<u8>]) -> Option<Vec<u8>> {
+    if cert_chain_der.is_empty() {
+        return None;
+    }
+
+    let mut certificate_list = Vec::new();
+    for cert in cert_chain_der {
+        if cert.is_empty() {
+            return None;
+        }
+        certificate_list.extend_from_slice(&u24_bytes(cert.len())?);
+        certificate_list.extend_from_slice(cert);
+        certificate_list.extend_from_slice(&0u16.to_be_bytes()); // cert_entry extensions
+    }
+
+    // Certificate = context_len(1) + certificate_list_len(3) + entries
+    let body_len = 1usize
+        .checked_add(3)?
+        .checked_add(certificate_list.len())?;
+
+    let mut message = Vec::with_capacity(4 + body_len);
+    message.push(0x0b); // HandshakeType::certificate
+    message.extend_from_slice(&u24_bytes(body_len)?);
+    message.push(0x00); // certificate_request_context length
+    message.extend_from_slice(&u24_bytes(certificate_list.len())?);
+    message.extend_from_slice(&certificate_list);
+    Some(message)
+}
+
 async fn fetch_via_raw_tls(
     host: &str,
     port: u16,
@@ -368,6 +414,7 @@ async fn fetch_via_raw_tls(
         },
         total_app_data_len,
         cert_info: None,
+        cert_payload: None,
     })
 }
 
@@ -429,8 +476,19 @@ pub async fn fetch_real_tls(
         .peer_certificates()
         .map(|slice| slice.to_vec())
         .unwrap_or_default();
+    let cert_chain_der: Vec<Vec<u8>> = certs.iter().map(|c| c.as_ref().to_vec()).collect();
+    let cert_payload = encode_tls13_certificate_message(&cert_chain_der).map(|certificate_message| {
+        TlsCertPayload {
+            cert_chain_der: cert_chain_der.clone(),
+            certificate_message,
+        }
+    });
 
-    let total_cert_len: usize = certs.iter().map(|c| c.len()).sum::<usize>().max(1024);
+    let total_cert_len = cert_payload
+        .as_ref()
+        .map(|payload| payload.certificate_message.len())
+        .unwrap_or_else(|| cert_chain_der.iter().map(Vec::len).sum::<usize>())
+        .max(1024);
     let cert_info = parse_cert_info(&certs);
 
     // Heuristic: split across two records if large to mimic real servers a bit.
@@ -453,6 +511,7 @@ pub async fn fetch_real_tls(
         sni = %sni,
         len = total_cert_len,
         cipher = format!("0x{:04x}", u16::from_be_bytes(cipher_suite)),
+        has_cert_payload = cert_payload.is_some(),
         "Fetched TLS metadata via rustls"
     );
 
@@ -461,5 +520,38 @@ pub async fn fetch_real_tls(
         app_data_records_sizes: app_data_records_sizes.clone(),
         total_app_data_len: app_data_records_sizes.iter().sum(),
         cert_info,
+        cert_payload,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_tls13_certificate_message;
+
+    fn read_u24(bytes: &[u8]) -> usize {
+        ((bytes[0] as usize) << 16) | ((bytes[1] as usize) << 8) | (bytes[2] as usize)
+    }
+
+    #[test]
+    fn test_encode_tls13_certificate_message_single_cert() {
+        let cert = vec![0x30, 0x03, 0x02, 0x01, 0x01];
+        let message = encode_tls13_certificate_message(&[cert.clone()]).expect("message");
+
+        assert_eq!(message[0], 0x0b);
+        assert_eq!(read_u24(&message[1..4]), message.len() - 4);
+        assert_eq!(message[4], 0x00);
+
+        let cert_list_len = read_u24(&message[5..8]);
+        assert_eq!(cert_list_len, cert.len() + 5);
+
+        let cert_len = read_u24(&message[8..11]);
+        assert_eq!(cert_len, cert.len());
+        assert_eq!(&message[11..11 + cert.len()], cert.as_slice());
+        assert_eq!(&message[11 + cert.len()..13 + cert.len()], &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_encode_tls13_certificate_message_empty_chain() {
+        assert!(encode_tls13_certificate_message(&[]).is_none());
+    }
 }

@@ -31,6 +31,7 @@ impl TlsFrontCache {
         let default = Arc::new(CachedTlsData {
             server_hello_template: default_template,
             cert_info: None,
+            cert_payload: None,
             app_data_records_sizes: vec![default_len],
             total_app_data_len: default_len,
             fetched_at: SystemTime::now(),
@@ -142,6 +143,7 @@ impl TlsFrontCache {
         let data = CachedTlsData {
             server_hello_template: fetched.server_hello_parsed,
             cert_info: fetched.cert_info,
+            cert_payload: fetched.cert_payload,
             app_data_records_sizes: fetched.app_data_records_sizes.clone(),
             total_app_data_len: fetched.total_app_data_len,
             fetched_at: SystemTime::now(),
