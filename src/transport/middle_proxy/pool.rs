@@ -498,10 +498,10 @@ impl MePool {
             let mut guard = self.proxy_map_v4.write().await;
             let keys: Vec<i32> = guard.keys().cloned().collect();
             for k in keys.iter().cloned().filter(|k| *k > 0) {
-                if !guard.contains_key(&-k) {
-                    if let Some(addrs) = guard.get(&k).cloned() {
-                        guard.insert(-k, addrs);
-                    }
+                if !guard.contains_key(&-k)
+                    && let Some(addrs) = guard.get(&k).cloned()
+                {
+                    guard.insert(-k, addrs);
                 }
             }
         }
@@ -509,10 +509,10 @@ impl MePool {
             let mut guard = self.proxy_map_v6.write().await;
             let keys: Vec<i32> = guard.keys().cloned().collect();
             for k in keys.iter().cloned().filter(|k| *k > 0) {
-                if !guard.contains_key(&-k) {
-                    if let Some(addrs) = guard.get(&k).cloned() {
-                        guard.insert(-k, addrs);
-                    }
+                if !guard.contains_key(&-k)
+                    && let Some(addrs) = guard.get(&k).cloned()
+                {
+                    guard.insert(-k, addrs);
                 }
             }
         }
@@ -760,13 +760,12 @@ impl MePool {
                 cancel_reader_token.clone(),
             )
             .await;
-            if let Some(pool) = pool.upgrade() {
-                if cleanup_for_reader
+            if let Some(pool) = pool.upgrade()
+                && cleanup_for_reader
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                     .is_ok()
-                {
-                    pool.remove_writer_and_close_clients(writer_id).await;
-                }
+            {
+                pool.remove_writer_and_close_clients(writer_id).await;
             }
             if let Err(e) = res {
                 warn!(error = %e, "ME reader ended");
@@ -834,13 +833,12 @@ impl MePool {
                     stats_ping.increment_me_keepalive_failed();
                     debug!("ME ping failed, removing dead writer");
                     cancel_ping.cancel();
-                    if let Some(pool) = pool_ping.upgrade() {
-                        if cleanup_for_ping
+                    if let Some(pool) = pool_ping.upgrade()
+                        && cleanup_for_ping
                             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                             .is_ok()
-                        {
-                            pool.remove_writer_and_close_clients(writer_id).await;
-                        }
+                    {
+                        pool.remove_writer_and_close_clients(writer_id).await;
                     }
                     break;
                 }
@@ -943,24 +941,20 @@ impl MePool {
         let pool = Arc::downgrade(self);
         tokio::spawn(async move {
             let deadline = timeout.map(|t| Instant::now() + t);
-            loop {
-                if let Some(p) = pool.upgrade() {
-                    if let Some(deadline_at) = deadline {
-                        if Instant::now() >= deadline_at {
-                            warn!(writer_id, "Drain timeout, force-closing");
-                            p.stats.increment_pool_force_close_total();
-                            let _ = p.remove_writer_and_close_clients(writer_id).await;
-                            break;
-                        }
-                    }
-                    if p.registry.is_writer_empty(writer_id).await {
-                        let _ = p.remove_writer_only(writer_id).await;
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                } else {
+            while let Some(p) = pool.upgrade() {
+                if let Some(deadline_at) = deadline
+                    && Instant::now() >= deadline_at
+                {
+                    warn!(writer_id, "Drain timeout, force-closing");
+                    p.stats.increment_pool_force_close_total();
+                    let _ = p.remove_writer_and_close_clients(writer_id).await;
                     break;
                 }
+                if p.registry.is_writer_empty(writer_id).await {
+                    let _ = p.remove_writer_only(writer_id).await;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
     }

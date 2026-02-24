@@ -171,15 +171,15 @@ pub(crate) fn default_cache_public_ip_path() -> String {
 }
 
 pub(crate) fn default_proxy_secret_reload_secs() -> u64 {
-    1 * 60 * 60
+    60 * 60
 }
 
 pub(crate) fn default_proxy_config_reload_secs() -> u64 {
-    1 * 60 * 60
+    60 * 60
 }
 
 pub(crate) fn default_update_every_secs() -> u64 {
-    1 * 30 * 60
+    30 * 60
 }
 
 pub(crate) fn default_me_reinit_drain_timeout_secs() -> u64 {

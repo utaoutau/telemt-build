@@ -594,18 +594,18 @@ impl RunningClientHandler {
         peer_addr: SocketAddr,
         ip_tracker: &UserIpTracker,
     ) -> Result<()> {
-        if let Some(expiration) = config.access.user_expirations.get(user) {
-            if chrono::Utc::now() > *expiration {
-                return Err(ProxyError::UserExpired {
-                    user: user.to_string(),
-                });
-            }
+        if let Some(expiration) = config.access.user_expirations.get(user)
+            && chrono::Utc::now() > *expiration
+        {
+            return Err(ProxyError::UserExpired {
+                user: user.to_string(),
+            });
         }
 
         // IP limit check
         if let Err(reason) = ip_tracker.check_and_add(user, peer_addr.ip()).await {
             warn!(
-                user = %user, 
+                user = %user,
                 ip = %peer_addr.ip(),
                 reason = %reason,
                 "IP limit exceeded"
@@ -615,20 +615,20 @@ impl RunningClientHandler {
             });
         }
 
-        if let Some(limit) = config.access.user_max_tcp_conns.get(user) {
-            if stats.get_user_curr_connects(user) >= *limit as u64 {
-                return Err(ProxyError::ConnectionLimitExceeded {
-                    user: user.to_string(),
-                });
-            }
+        if let Some(limit) = config.access.user_max_tcp_conns.get(user)
+            && stats.get_user_curr_connects(user) >= *limit as u64
+        {
+            return Err(ProxyError::ConnectionLimitExceeded {
+                user: user.to_string(),
+            });
         }
 
-        if let Some(quota) = config.access.user_data_quota.get(user) {
-            if stats.get_user_total_octets(user) >= *quota {
-                return Err(ProxyError::DataQuotaExceeded {
-                    user: user.to_string(),
-                });
-            }
+        if let Some(quota) = config.access.user_data_quota.get(user)
+            && stats.get_user_total_octets(user) >= *quota
+        {
+            return Err(ProxyError::DataQuotaExceeded {
+                user: user.to_string(),
+            });
         }
 
         Ok(())
