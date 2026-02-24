@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod beobachten;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, Duration};
 use dashmap::DashMap;
