@@ -278,23 +278,25 @@ impl ProxyConfig {
                     reuse_allow: false,
                 });
             }
-            if let Some(ipv6_str) = &config.server.listen_addr_ipv6 {
-                if let Ok(ipv6) = ipv6_str.parse::<IpAddr>() {
-                    config.server.listeners.push(ListenerConfig {
-                        ip: ipv6,
-                        announce: None,
-                        announce_ip: None,
-                        proxy_protocol: None,
-                        reuse_allow: false,
-                    });
-                }
+            if let Some(ipv6_str) = &config.server.listen_addr_ipv6
+                && let Ok(ipv6) = ipv6_str.parse::<IpAddr>()
+            {
+                config.server.listeners.push(ListenerConfig {
+                    ip: ipv6,
+                    announce: None,
+                    announce_ip: None,
+                    proxy_protocol: None,
+                    reuse_allow: false,
+                });
             }
         }
 
         // Migration: announce_ip → announce for each listener.
         for listener in &mut config.server.listeners {
-            if listener.announce.is_none() && listener.announce_ip.is_some() {
-                listener.announce = Some(listener.announce_ip.unwrap().to_string());
+            if listener.announce.is_none()
+                && let Some(ip) = listener.announce_ip.take()
+            {
+                listener.announce = Some(ip.to_string());
             }
         }
 
