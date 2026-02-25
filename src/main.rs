@@ -203,14 +203,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
 
     let (filter_layer, filter_handle) = reload::Layer::new(EnvFilter::new("info"));
-    
+
     // Configure color output based on config
     let fmt_layer = if config.general.disable_colors {
         fmt::Layer::default().with_ansi(false)
     } else {
         fmt::Layer::default().with_ansi(true)
     };
-    
+
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt_layer)
@@ -272,7 +272,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // IP Tracker initialization
     let ip_tracker = Arc::new(UserIpTracker::new());
     ip_tracker.load_limits(&config.access.user_max_unique_ips).await;
-    
+
     if !config.access.user_max_unique_ips.is_empty() {
         info!("IP limits configured for {} users", config.access.user_max_unique_ips.len());
     }
@@ -598,7 +598,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 			.v4_results
 			.iter()
 			.any(|r| r.rtt_ms.is_some());
-		
+
 		if upstream_result.both_available {
 			if prefer_ipv6 {
 				info!("  IPv6 in use / IPv4 is fallback");
@@ -606,9 +606,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 				info!("  IPv4 in use / IPv6 is fallback");
 			}
 		} else if v6_works && !v4_works {
-			info!("  IPv6 only / IPv4 unavailable)");
+			info!("  IPv6 only / IPv4 unavailable");
 		} else if v4_works && !v6_works {
-			info!("  IPv4 only / IPv6 unavailable)");
+			info!("  IPv4 only / IPv6 unavailable");
 		} else if !v6_works && !v4_works {
 			info!("  No DC connectivity");
 		}
