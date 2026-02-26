@@ -160,11 +160,13 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub middle_proxy_nat_probe: bool,
 
-    /// Optional STUN server address (host:port) for NAT probing.
+    /// Deprecated legacy single STUN server for NAT probing.
+    /// Use `network.stun_servers` instead.
     #[serde(default = "default_middle_proxy_nat_stun")]
     pub middle_proxy_nat_stun: Option<String>,
 
-    /// Optional list of STUN servers for NAT probing fallback.
+    /// Deprecated legacy STUN list for NAT probing fallback.
+    /// Use `network.stun_servers` instead.
     #[serde(default = "default_middle_proxy_nat_stun_servers")]
     pub middle_proxy_nat_stun_servers: Vec<String>,
 

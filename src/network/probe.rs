@@ -57,8 +57,6 @@ const STUN_BATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run_probe(
     config: &NetworkConfig,
-    stun_addr: Option<String>,
-    stun_servers: Vec<String>,
     nat_probe: bool,
     stun_nat_probe_concurrency: usize,
 ) -> Result<NetworkProbe> {
@@ -71,12 +69,17 @@ pub async fn run_probe(
     probe.ipv6_is_bogon = probe.detected_ipv6.map(is_bogon_v6).unwrap_or(false);
 
     let stun_res = if nat_probe {
-        let servers = collect_stun_servers(config, stun_addr, stun_servers);
-        probe_stun_servers_parallel(
-            &servers,
-            stun_nat_probe_concurrency.max(1),
-        )
-        .await
+        let servers = collect_stun_servers(config);
+        if servers.is_empty() {
+            warn!("STUN probe is enabled but network.stun_servers is empty");
+            DualStunResult::default()
+        } else {
+            probe_stun_servers_parallel(
+                &servers,
+                stun_nat_probe_concurrency.max(1),
+            )
+            .await
+        }
     } else {
         DualStunResult::default()
     };
@@ -143,36 +146,13 @@ async fn detect_public_ipv4_http(urls: &[String]) -> Option<Ipv4Addr> {
     None
 }
 
-fn collect_stun_servers(
-    config: &NetworkConfig,
-    stun_addr: Option<String>,
-    stun_servers: Vec<String>,
-) -> Vec<String> {
+fn collect_stun_servers(config: &NetworkConfig) -> Vec<String> {
     let mut out = Vec::new();
-    if !stun_servers.is_empty() {
-        for s in stun_servers {
-            if !s.is_empty() && !out.contains(&s) {
-                out.push(s);
-            }
-        }
-    } else if let Some(s) = stun_addr
-        && !s.is_empty()
-    {
-        out.push(s);
-    }
-
-    if out.is_empty() {
-        for s in &config.stun_servers {
-            if !s.is_empty() && !out.contains(s) {
-                out.push(s.clone());
-            }
+    for s in &config.stun_servers {
+        if !s.is_empty() && !out.contains(s) {
+            out.push(s.clone());
         }
     }
-
-    if out.is_empty() {
-        out.push("stun.l.google.com:19302".to_string());
-    }
-
     out
 }
 

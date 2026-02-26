@@ -65,6 +65,16 @@ fn validate_network_cfg(net: &mut NetworkConfig) -> Result<()> {
     Ok(())
 }
 
+fn push_unique_nonempty(target: &mut Vec<String>, value: String) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !target.iter().any(|existing| existing == trimmed) {
+        target.push(trimmed.to_string());
+    }
+}
+
 // ============= Main Config =============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -136,6 +146,30 @@ impl ProxyConfig {
 
         if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
             config.general.update_every = None;
+        }
+
+        let legacy_nat_stun = config.general.middle_proxy_nat_stun.take();
+        let legacy_nat_stun_servers = std::mem::take(&mut config.general.middle_proxy_nat_stun_servers);
+        let legacy_nat_stun_used = legacy_nat_stun.is_some() || !legacy_nat_stun_servers.is_empty();
+
+        let mut unified_stun_servers = Vec::new();
+        for stun in std::mem::take(&mut config.network.stun_servers) {
+            push_unique_nonempty(&mut unified_stun_servers, stun);
+        }
+        if let Some(stun) = legacy_nat_stun {
+            push_unique_nonempty(&mut unified_stun_servers, stun);
+        }
+        for stun in legacy_nat_stun_servers {
+            push_unique_nonempty(&mut unified_stun_servers, stun);
+        }
+
+        if unified_stun_servers.is_empty() {
+            unified_stun_servers = default_stun_servers();
+        }
+        config.network.stun_servers = unified_stun_servers;
+
+        if legacy_nat_stun_used {
+            warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are deprecated; use network.stun_servers");
         }
 
         if let Some(update_every) = config.general.update_every {

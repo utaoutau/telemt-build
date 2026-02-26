@@ -256,8 +256,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let probe = run_probe(
         &config.network,
-        config.general.middle_proxy_nat_stun.clone(),
-        config.general.middle_proxy_nat_stun_servers.clone(),
         config.general.middle_proxy_nat_probe,
         config.general.stun_nat_probe_concurrency,
     )
@@ -360,8 +358,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     proxy_secret,
                     config.general.middle_proxy_nat_ip,
                     config.general.middle_proxy_nat_probe,
-                    config.general.middle_proxy_nat_stun.clone(),
-                    config.general.middle_proxy_nat_stun_servers.clone(),
+                    None,
+                    config.network.stun_servers.clone(),
                     config.general.stun_nat_probe_concurrency,
                     probe.detected_ipv6,
                     config.timeouts.me_one_retry,

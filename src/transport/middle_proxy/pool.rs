@@ -1199,6 +1199,35 @@ impl MePool {
             return false;
         }
         addrs.shuffle(&mut rand::rng());
+        if addrs.len() > 1 {
+            let mut join = tokio::task::JoinSet::new();
+            for (ip, port) in addrs {
+                let addr = SocketAddr::new(ip, port);
+                let pool = Arc::clone(&self);
+                let rng_clone = Arc::clone(&rng);
+                join.spawn(async move { (addr, pool.connect_one(addr, rng_clone.as_ref()).await) });
+            }
+
+            while let Some(res) = join.join_next().await {
+                match res {
+                    Ok((addr, Ok(()))) => {
+                        info!(%addr, dc = %dc, "ME connected");
+                        join.abort_all();
+                        while join.join_next().await.is_some() {}
+                        return true;
+                    }
+                    Ok((addr, Err(e))) => {
+                        warn!(%addr, dc = %dc, error = %e, "ME connect failed, trying next");
+                    }
+                    Err(e) => {
+                        warn!(dc = %dc, error = %e, "ME connect task failed");
+                    }
+                }
+            }
+            warn!(dc = %dc, "All ME servers for DC failed at init");
+            return false;
+        }
+
         for (ip, port) in addrs {
             let addr = SocketAddr::new(ip, port);
             match self.connect_one(addr, rng.as_ref()).await {

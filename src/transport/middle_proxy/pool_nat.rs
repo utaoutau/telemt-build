@@ -17,7 +17,15 @@ const STUN_BATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[allow(dead_code)]
 pub async fn stun_probe(stun_addr: Option<String>) -> Result<crate::network::stun::DualStunResult> {
-    let stun_addr = stun_addr.unwrap_or_else(|| "stun.l.google.com:19302".to_string());
+    let stun_addr = stun_addr.unwrap_or_else(|| {
+        crate::config::defaults::default_stun_servers()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    });
+    if stun_addr.is_empty() {
+        return Err(ProxyError::Proxy("STUN server is not configured".to_string()));
+    }
     stun_probe_dual(&stun_addr).await
 }
 
@@ -31,10 +39,12 @@ impl MePool {
         if !self.nat_stun_servers.is_empty() {
             return self.nat_stun_servers.clone();
         }
-        if let Some(s) = &self.nat_stun {
+        if let Some(s) = &self.nat_stun
+            && !s.trim().is_empty()
+        {
             return vec![s.clone()];
         }
-        vec!["stun.l.google.com:19302".to_string()]
+        Vec::new()
     }
 
     async fn probe_stun_batch_for_family(
