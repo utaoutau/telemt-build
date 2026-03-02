@@ -303,10 +303,6 @@ impl MePool {
         self.active_generation.load(Ordering::Relaxed)
     }
 
-    pub(super) fn warm_generation(&self) -> u64 {
-        self.warm_generation.load(Ordering::Relaxed)
-    }
-
     pub fn update_runtime_reinit_policy(
         &self,
         hardswap: bool,
