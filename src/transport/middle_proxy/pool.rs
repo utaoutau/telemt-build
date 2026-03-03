@@ -127,7 +127,7 @@ pub struct MePool {
     pub(super) pending_hardswap_map_hash: AtomicU64,
     pub(super) hardswap: AtomicBool,
     pub(super) endpoint_quarantine: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
-    pub(super) kdf_material_fingerprint: Arc<Mutex<HashMap<SocketAddr, u64>>>,
+    pub(super) kdf_material_fingerprint: Arc<Mutex<HashMap<SocketAddr, (u64, u16)>>>,
     pub(super) me_pool_drain_ttl_secs: AtomicU64,
     pub(super) me_pool_force_close_secs: AtomicU64,
     pub(super) me_pool_min_fresh_ratio_permille: AtomicU32,
