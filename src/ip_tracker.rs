@@ -67,21 +67,14 @@ impl UserIpTracker {
             let max_ips = self.max_ips.read().await;
             max_ips.get(username).copied()
         };
+        let mode = *self.limit_mode.read().await;
+        let window = *self.limit_window.read().await;
+        let now = Instant::now();
 
         let mut active_ips = self.active_ips.write().await;
         let user_active = active_ips
             .entry(username.to_string())
             .or_insert_with(HashSet::new);
-
-        if limit.is_none() {
-            user_active.insert(ip);
-            return Ok(());
-        }
-
-        let limit = limit.unwrap_or_default();
-        let mode = *self.limit_mode.read().await;
-        let window = *self.limit_window.read().await;
-        let now = Instant::now();
 
         let mut recent_ips = self.recent_ips.write().await;
         let user_recent = recent_ips
@@ -94,24 +87,26 @@ impl UserIpTracker {
             return Ok(());
         }
 
-        let active_limit_reached = user_active.len() >= limit;
-        let recent_limit_reached = user_recent.len() >= limit;
-        let deny = match mode {
-            UserMaxUniqueIpsMode::ActiveWindow => active_limit_reached,
-            UserMaxUniqueIpsMode::TimeWindow => recent_limit_reached,
-            UserMaxUniqueIpsMode::Combined => active_limit_reached || recent_limit_reached,
-        };
+        if let Some(limit) = limit {
+            let active_limit_reached = user_active.len() >= limit;
+            let recent_limit_reached = user_recent.len() >= limit;
+            let deny = match mode {
+                UserMaxUniqueIpsMode::ActiveWindow => active_limit_reached,
+                UserMaxUniqueIpsMode::TimeWindow => recent_limit_reached,
+                UserMaxUniqueIpsMode::Combined => active_limit_reached || recent_limit_reached,
+            };
 
-        if deny {
-            return Err(format!(
-                "IP limit reached for user '{}': active={}/{} recent={}/{} mode={:?}",
-                username,
-                user_active.len(),
-                limit,
-                user_recent.len(),
-                limit,
-                mode
-            ));
+            if deny {
+                return Err(format!(
+                    "IP limit reached for user '{}': active={}/{} recent={}/{} mode={:?}",
+                    username,
+                    user_active.len(),
+                    limit,
+                    user_recent.len(),
+                    limit,
+                    mode
+                ));
+            }
         }
 
         user_active.insert(ip);
@@ -127,18 +122,26 @@ impl UserIpTracker {
                 active_ips.remove(username);
             }
         }
-        drop(active_ips);
+    }
 
-        let mode = *self.limit_mode.read().await;
-        if matches!(mode, UserMaxUniqueIpsMode::ActiveWindow) {
-            let mut recent_ips = self.recent_ips.write().await;
-            if let Some(user_recent) = recent_ips.get_mut(username) {
-                user_recent.remove(&ip);
-                if user_recent.is_empty() {
-                    recent_ips.remove(username);
-                }
-            }
+    pub async fn get_recent_counts_for_users(&self, users: &[String]) -> HashMap<String, usize> {
+        let window = *self.limit_window.read().await;
+        let now = Instant::now();
+        let mut recent_ips = self.recent_ips.write().await;
+
+        let mut counts = HashMap::with_capacity(users.len());
+        for user in users {
+            let count = if let Some(user_recent) = recent_ips.get_mut(user) {
+                Self::prune_recent(user_recent, now, window);
+                user_recent.len()
+            } else {
+                0
+            };
+            counts.insert(user.clone(), count);
         }
+
+        recent_ips.retain(|_, user_recent| !user_recent.is_empty());
+        counts
     }
 
     pub async fn get_active_ip_count(&self, username: &str) -> usize {

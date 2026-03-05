@@ -369,6 +369,7 @@ pub(super) struct UserInfo {
     pub(super) max_unique_ips: Option<usize>,
     pub(super) current_connections: u64,
     pub(super) active_unique_ips: usize,
+    pub(super) recent_unique_ips: usize,
     pub(super) total_octets: u64,
     pub(super) links: UserLinks,
 }

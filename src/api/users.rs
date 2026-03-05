@@ -112,6 +112,7 @@ pub(super) async fn create_user(
             max_unique_ips: updated_limit,
             current_connections: 0,
             active_unique_ips: 0,
+            recent_unique_ips: 0,
             total_octets: 0,
             links: build_user_links(
                 &cfg,
@@ -300,7 +301,7 @@ pub(super) async fn users_from_config(
     startup_detected_ip_v4: Option<IpAddr>,
     startup_detected_ip_v6: Option<IpAddr>,
 ) -> Vec<UserInfo> {
-    let ip_counts = ip_tracker
+    let active_ip_counts = ip_tracker
         .get_stats()
         .await
         .into_iter()
@@ -309,6 +310,7 @@ pub(super) async fn users_from_config(
 
     let mut names = cfg.access.users.keys().cloned().collect::<Vec<_>>();
     names.sort();
+    let recent_ip_counts = ip_tracker.get_recent_counts_for_users(&names).await;
 
     let mut users = Vec::with_capacity(names.len());
     for username in names {
@@ -340,7 +342,8 @@ pub(super) async fn users_from_config(
             data_quota_bytes: cfg.access.user_data_quota.get(&username).copied(),
             max_unique_ips: cfg.access.user_max_unique_ips.get(&username).copied(),
             current_connections: stats.get_user_curr_connects(&username),
-            active_unique_ips: ip_counts.get(&username).copied().unwrap_or(0),
+            active_unique_ips: active_ip_counts.get(&username).copied().unwrap_or(0),
+            recent_unique_ips: recent_ip_counts.get(&username).copied().unwrap_or(0),
             total_octets: stats.get_user_total_octets(&username),
             links,
             username,
