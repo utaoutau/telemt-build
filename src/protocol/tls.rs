@@ -5,6 +5,61 @@
 //! actually carries MTProto authentication data.
 
 #![allow(dead_code)]
+#![cfg_attr(not(test), forbid(clippy::undocumented_unsafe_blocks))]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::correctness,
+        clippy::option_if_let_else,
+        clippy::or_fun_call,
+        clippy::branches_sharing_code,
+        clippy::single_option_map,
+        clippy::useless_let_if_seq,
+        clippy::redundant_locals,
+        clippy::cloned_ref_to_slice_refs,
+        unsafe_code,
+        clippy::await_holding_lock,
+        clippy::await_holding_refcell_ref,
+        clippy::debug_assert_with_mut_call,
+        clippy::macro_use_imports,
+        clippy::cast_ptr_alignment,
+        clippy::cast_lossless,
+        clippy::ptr_as_ptr,
+        clippy::large_stack_arrays,
+        clippy::same_functions_in_if_condition,
+        trivial_casts,
+        trivial_numeric_casts,
+        unused_extern_crates,
+        unused_import_braces,
+        rust_2018_idioms
+    )
+)]
+#![cfg_attr(
+    not(test),
+    allow(
+        clippy::use_self,
+        clippy::redundant_closure,
+        clippy::too_many_arguments,
+        clippy::doc_markdown,
+        clippy::missing_const_for_fn,
+        clippy::unnecessary_operation,
+        clippy::redundant_pub_crate,
+        clippy::derive_partial_eq_without_eq,
+        clippy::type_complexity,
+        clippy::new_ret_no_self,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::significant_drop_tightening,
+        clippy::significant_drop_in_scrutinee,
+        clippy::float_cmp,
+        clippy::nursery
+    )
+)]
 
 use super::constants::*;
 use crate::crypto::{SecureRandom, sha256_hmac};
@@ -127,7 +182,6 @@ impl TlsExtensionBuilder {
     }
 
     /// Build final extensions with length prefix
-
     fn build(self) -> Vec<u8> {
         let mut result = Vec::with_capacity(2 + self.extensions.len());
 
@@ -142,7 +196,6 @@ impl TlsExtensionBuilder {
     }
 
     /// Get current extensions without length prefix (for calculation)
-
     fn as_bytes(&self) -> &[u8] {
         &self.extensions
     }
@@ -258,7 +311,6 @@ impl ServerHelloBuilder {
 /// Returns validation result if a matching user is found.
 /// The result **must** be used — ignoring it silently bypasses authentication.
 #[must_use]
-
 pub fn validate_tls_handshake(
     handshake: &[u8],
     secrets: &[(String, Vec<u8>)],
@@ -628,11 +680,10 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
                 if name_type == 0
                     && name_len > 0
                     && let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len])
+                    && is_valid_sni_hostname(host)
                 {
-                    if is_valid_sni_hostname(host) {
-                        extracted_sni = Some(host.to_string());
-                        break;
-                    }
+                    extracted_sni = Some(host.to_string());
+                    break;
                 }
                 sn_pos += name_len;
             }
@@ -754,7 +805,6 @@ pub fn is_tls_handshake(first_bytes: &[u8]) -> bool {
 }
 
 /// Parse TLS record header, returns (record_type, length)
-
 pub fn parse_tls_record_header(header: &[u8; 5]) -> Option<(u8, u16)> {
     let record_type = header[0];
     let version = [header[1], header[2]];

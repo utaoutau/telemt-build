@@ -953,24 +953,6 @@ fn light_fuzz_desync_dedup_temporal_gate_behavior_is_stable() {
     panic!("expected at least one post-window sample to re-emit forensic record");
 }
 
-#[test]
-#[ignore = "Tracking for M-04: Verify should_emit_full_desync returns true on first occurrence and false on duplicate within window"]
-fn should_emit_full_desync_filters_duplicates() {
-    unimplemented!("Stub for M-04");
-}
-
-#[test]
-#[ignore = "Tracking for M-04: Verify desync dedup eviction behaves correctly under map-full condition"]
-fn desync_dedup_eviction_under_map_full_condition() {
-    unimplemented!("Stub for M-04");
-}
-
-#[tokio::test]
-#[ignore = "Tracking for M-05: Verify C2ME channel full path yields then sends under backpressure"]
-async fn c2me_channel_full_path_yields_then_sends() {
-    unimplemented!("Stub for M-05");
-}
-
 fn make_forensics_state() -> RelayForensicsState {
     RelayForensicsState {
         trace_id: 1,

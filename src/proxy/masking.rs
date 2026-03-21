@@ -316,11 +316,11 @@ pub async fn handle_bad_client<R, W>(
                     peer,
                     local_addr,
                 );
-                if let Some(header) = proxy_header {
-                    if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
-                        wait_mask_outcome_budget(outcome_started, config).await;
-                        return;
-                    }
+                if let Some(header) = proxy_header
+                    && !write_proxy_header_with_timeout(&mut mask_write, &header).await
+                {
+                    wait_mask_outcome_budget(outcome_started, config).await;
+                    return;
                 }
                 if timeout(
                     MASK_RELAY_TIMEOUT,
@@ -387,11 +387,11 @@ pub async fn handle_bad_client<R, W>(
                 build_mask_proxy_header(config.censorship.mask_proxy_protocol, peer, local_addr);
 
             let (mask_read, mut mask_write) = stream.into_split();
-            if let Some(header) = proxy_header {
-                if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
-                    wait_mask_outcome_budget(outcome_started, config).await;
-                    return;
-                }
+            if let Some(header) = proxy_header
+                && !write_proxy_header_with_timeout(&mut mask_write, &header).await
+            {
+                wait_mask_outcome_budget(outcome_started, config).await;
+                return;
             }
             if timeout(
                 MASK_RELAY_TIMEOUT,

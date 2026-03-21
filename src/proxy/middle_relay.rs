@@ -1,7 +1,6 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeSet, HashMap};
-use std::hash::BuildHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -286,9 +285,7 @@ impl MeD2cFlushPolicy {
 
 fn hash_value<T: Hash>(value: &T) -> u64 {
     let state = DESYNC_HASHER.get_or_init(RandomState::new);
-    let mut hasher = state.build_hasher();
-    value.hash(&mut hasher);
-    hasher.finish()
+    state.hash_one(value)
 }
 
 fn hash_ip(ip: IpAddr) -> u64 {
@@ -686,7 +683,6 @@ where
         .max(C2ME_CHANNEL_CAPACITY_FALLBACK);
     let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(c2me_channel_capacity);
     let me_pool_c2me = me_pool.clone();
-    let effective_tag = effective_tag;
     let c2me_sender = tokio::spawn(async move {
         let mut sent_since_yield = 0usize;
         while let Some(cmd) = c2me_rx.recv().await {
@@ -1645,3 +1641,7 @@ mod idle_policy_security_tests;
 #[cfg(test)]
 #[path = "tests/middle_relay_desync_all_full_dedup_security_tests.rs"]
 mod desync_all_full_dedup_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_stub_completion_security_tests.rs"]
+mod stub_completion_security_tests;
