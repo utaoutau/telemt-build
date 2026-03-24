@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{ProxyConfig, UnknownSniAction};
@@ -28,6 +28,8 @@ use rand::RngExt;
 
 const ACCESS_SECRET_BYTES: usize = 16;
 static INVALID_SECRET_WARNED: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+const UNKNOWN_SNI_WARN_COOLDOWN_SECS: u64 = 5;
+static UNKNOWN_SNI_WARN_NEXT_ALLOWED: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 #[cfg(test)]
 const WARNED_SECRET_MAX_ENTRIES: usize = 64;
 #[cfg(not(test))]
@@ -84,6 +86,24 @@ fn auth_probe_saturation_state_lock()
     auth_probe_saturation_state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn unknown_sni_warn_state_lock() -> std::sync::MutexGuard<'static, Option<Instant>> {
+    UNKNOWN_SNI_WARN_NEXT_ALLOWED
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn should_emit_unknown_sni_warn(now: Instant) -> bool {
+    let mut guard = unknown_sni_warn_state_lock();
+    if let Some(next_allowed) = *guard
+        && now < next_allowed
+    {
+        return false;
+    }
+    *guard = Some(now + Duration::from_secs(UNKNOWN_SNI_WARN_COOLDOWN_SECS));
+    true
 }
 
 fn normalize_auth_probe_ip(peer_ip: IpAddr) -> IpAddr {
@@ -413,6 +433,25 @@ fn auth_probe_test_lock() -> &'static Mutex<()> {
 }
 
 #[cfg(test)]
+fn unknown_sni_warn_test_lock() -> &'static Mutex<()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn clear_unknown_sni_warn_state_for_testing() {
+    if UNKNOWN_SNI_WARN_NEXT_ALLOWED.get().is_some() {
+        let mut guard = unknown_sni_warn_state_lock();
+        *guard = None;
+    }
+}
+
+#[cfg(test)]
+fn should_emit_unknown_sni_warn_for_testing(now: Instant) -> bool {
+    should_emit_unknown_sni_warn(now)
+}
+
+#[cfg(test)]
 fn clear_warned_secrets_for_testing() {
     if let Some(warned) = INVALID_SECRET_WARNED.get()
         && let Ok(mut guard) = warned.lock()
@@ -658,12 +697,25 @@ where
     if client_sni.is_some() && matched_tls_domain.is_none() && preferred_user_hint.is_none() {
         auth_probe_record_failure(peer.ip(), Instant::now());
         maybe_apply_server_hello_delay(config).await;
-        debug!(
-            peer = %peer,
-            sni = ?client_sni,
-            action = ?config.censorship.unknown_sni_action,
-            "TLS handshake rejected by unknown SNI policy"
-        );
+        let sni = client_sni.as_deref().unwrap_or_default();
+        let log_now = Instant::now();
+        if should_emit_unknown_sni_warn(log_now) {
+            warn!(
+                peer = %peer,
+                sni = %sni,
+                unknown_sni = true,
+                unknown_sni_action = ?config.censorship.unknown_sni_action,
+                "TLS handshake rejected by unknown SNI policy"
+            );
+        } else {
+            info!(
+                peer = %peer,
+                sni = %sni,
+                unknown_sni = true,
+                unknown_sni_action = ?config.censorship.unknown_sni_action,
+                "TLS handshake rejected by unknown SNI policy"
+            );
+        }
         return match config.censorship.unknown_sni_action {
             UnknownSniAction::Drop => HandshakeResult::Error(ProxyError::UnknownTlsSni),
             UnknownSniAction::Mask => HandshakeResult::BadClient { reader, writer },

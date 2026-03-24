@@ -1644,6 +1644,32 @@ fn auth_probe_capacity_fresh_full_map_still_tracks_newcomer_with_bounded_evictio
 }
 
 #[test]
+fn unknown_sni_warn_cooldown_first_event_is_warn_and_repeated_events_are_info_until_window_expires()
+{
+    let _guard = unknown_sni_warn_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_unknown_sni_warn_state_for_testing();
+
+    let now = Instant::now();
+
+    assert!(
+        should_emit_unknown_sni_warn_for_testing(now),
+        "first unknown SNI event must be eligible for WARN emission"
+    );
+    assert!(
+        !should_emit_unknown_sni_warn_for_testing(now + Duration::from_secs(1)),
+        "events inside cooldown window must be demoted from WARN to INFO"
+    );
+    assert!(
+        should_emit_unknown_sni_warn_for_testing(
+            now + Duration::from_secs(UNKNOWN_SNI_WARN_COOLDOWN_SECS)
+        ),
+        "once cooldown expires, next unknown SNI event must be WARN-eligible again"
+    );
+}
+
+#[test]
 fn stress_auth_probe_full_map_churn_keeps_bound_and_tracks_newcomers() {
     let _guard = auth_probe_test_lock()
         .lock()
