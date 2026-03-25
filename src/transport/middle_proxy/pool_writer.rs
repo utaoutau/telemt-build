@@ -425,15 +425,8 @@ impl MePool {
                 };
 
                 let (conn_id, mut service_rx) = pool.registry.register().await;
-                if !pool
-                    .registry
-                    .bind_writer(conn_id, writer_id, meta.clone())
-                    .await
-                {
-                    let _ = pool.registry.unregister(conn_id).await;
-                    stats_signal.increment_me_rpc_proxy_req_signal_skipped_no_meta_total();
-                    continue;
-                }
+                // Service RPC_PROXY_REQ signal path is intentionally route-only:
+                // do not bind synthetic conn_id into regular writer/client accounting.
 
                 let payload = build_proxy_req_payload(
                     conn_id,
