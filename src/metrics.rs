@@ -2490,6 +2490,48 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         if user_enabled { 0 } else { 1 }
     );
 
+    let ip_memory = ip_tracker.memory_stats().await;
+    let _ = writeln!(
+        out,
+        "# HELP telemt_ip_tracker_users Number of users tracked by IP limiter state"
+    );
+    let _ = writeln!(out, "# TYPE telemt_ip_tracker_users gauge");
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_users{{scope=\"active\"}} {}",
+        ip_memory.active_users
+    );
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_users{{scope=\"recent\"}} {}",
+        ip_memory.recent_users
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_ip_tracker_entries Number of IP entries tracked by limiter state"
+    );
+    let _ = writeln!(out, "# TYPE telemt_ip_tracker_entries gauge");
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_entries{{scope=\"active\"}} {}",
+        ip_memory.active_entries
+    );
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_entries{{scope=\"recent\"}} {}",
+        ip_memory.recent_entries
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_ip_tracker_cleanup_queue_len Deferred disconnect cleanup queue length"
+    );
+    let _ = writeln!(out, "# TYPE telemt_ip_tracker_cleanup_queue_len gauge");
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_cleanup_queue_len {}",
+        ip_memory.cleanup_queue_len
+    );
+
     if user_enabled {
         for entry in stats.iter_user_stats() {
             let user = entry.key();
@@ -2728,6 +2770,9 @@ mod tests {
         assert!(output.contains("telemt_user_unique_ips_recent_window{user=\"alice\"} 1"));
         assert!(output.contains("telemt_user_unique_ips_limit{user=\"alice\"} 4"));
         assert!(output.contains("telemt_user_unique_ips_utilization{user=\"alice\"} 0.250000"));
+        assert!(output.contains("telemt_ip_tracker_users{scope=\"active\"} 1"));
+        assert!(output.contains("telemt_ip_tracker_entries{scope=\"active\"} 1"));
+        assert!(output.contains("telemt_ip_tracker_cleanup_queue_len 0"));
     }
 
     #[tokio::test]
@@ -2799,6 +2844,9 @@ mod tests {
         assert!(output.contains("# TYPE telemt_user_unique_ips_recent_window gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_limit gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_utilization gauge"));
+        assert!(output.contains("# TYPE telemt_ip_tracker_users gauge"));
+        assert!(output.contains("# TYPE telemt_ip_tracker_entries gauge"));
+        assert!(output.contains("# TYPE telemt_ip_tracker_cleanup_queue_len gauge"));
     }
 
     #[tokio::test]

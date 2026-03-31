@@ -2171,6 +2171,8 @@ impl ReplayShard {
 
     fn cleanup(&mut self, now: Instant, window: Duration) {
         if window.is_zero() {
+            self.cache.clear();
+            self.queue.clear();
             return;
         }
         let cutoff = now.checked_sub(window).unwrap_or(now);
@@ -2192,13 +2194,22 @@ impl ReplayShard {
     }
 
     fn check(&mut self, key: &[u8], now: Instant, window: Duration) -> bool {
+        if window.is_zero() {
+            return false;
+        }
         self.cleanup(now, window);
         // key is &[u8], resolves Q=[u8] via Box<[u8]>: Borrow<[u8]>
         self.cache.get(key).is_some()
     }
 
     fn add(&mut self, key: &[u8], now: Instant, window: Duration) {
+        if window.is_zero() {
+            return;
+        }
         self.cleanup(now, window);
+        if self.cache.peek(key).is_some() {
+            return;
+        }
 
         let seq = self.next_seq();
         let boxed_key: Box<[u8]> = key.into();
@@ -2341,7 +2352,7 @@ impl ReplayChecker {
         let interval = if self.window.as_secs() > 60 {
             Duration::from_secs(30)
         } else {
-            Duration::from_secs(self.window.as_secs().max(1) / 2)
+            Duration::from_secs((self.window.as_secs().max(1) / 2).max(1))
         };
 
         loop {
@@ -2551,6 +2562,20 @@ mod tests {
         assert!(checker.check_handshake(b"expire"));
         std::thread::sleep(Duration::from_millis(100));
         assert!(!checker.check_handshake(b"expire"));
+    }
+
+    #[test]
+    fn test_replay_checker_zero_window_does_not_retain_entries() {
+        let checker = ReplayChecker::new(100, Duration::ZERO);
+
+        for _ in 0..1_000 {
+            assert!(!checker.check_handshake(b"no-retain"));
+            checker.add_handshake(b"no-retain");
+        }
+
+        let stats = checker.stats();
+        assert_eq!(stats.total_entries, 0);
+        assert_eq!(stats.total_queue_len, 0);
     }
 
     #[test]
