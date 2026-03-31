@@ -148,6 +148,41 @@ impl BufferPool {
         self.buffer_size
     }
 
+    /// Maximum number of buffers the pool will retain.
+    pub fn max_buffers(&self) -> usize {
+        self.max_buffers
+    }
+
+    /// Current number of pooled buffers.
+    pub fn pooled(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// Total buffers allocated (pooled + checked out).
+    pub fn allocated(&self) -> usize {
+        self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Best-effort number of buffers currently checked out.
+    pub fn in_use(&self) -> usize {
+        self.allocated().saturating_sub(self.pooled())
+    }
+
+    /// Trim pooled buffers down to a target count.
+    pub fn trim_to(&self, target_pooled: usize) {
+        let target = target_pooled.min(self.max_buffers);
+        loop {
+            if self.buffers.len() <= target {
+                break;
+            }
+            if self.buffers.pop().is_some() {
+                self.decrement_allocated();
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Preallocate buffers to fill the pool
     pub fn preallocate(&self, count: usize) {
         let to_alloc = count.min(self.max_buffers);

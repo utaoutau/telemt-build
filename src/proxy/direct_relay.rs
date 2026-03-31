@@ -276,6 +276,7 @@ where
     stats.increment_user_connects(user);
     let _direct_connection_lease = stats.acquire_direct_connection_lease();
 
+    let buffer_pool_trim = Arc::clone(&buffer_pool);
     let relay_result = relay_bidirectional(
         client_reader,
         client_writer,
@@ -321,6 +322,7 @@ where
         Err(e) => debug!(user = %user, error = %e, "Direct relay ended with error"),
     }
 
+    buffer_pool_trim.trim_to(buffer_pool_trim.max_buffers().min(64));
     relay_result
 }
 

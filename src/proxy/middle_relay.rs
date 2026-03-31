@@ -1317,6 +1317,7 @@ where
     );
     clear_relay_idle_candidate(conn_id);
     me_pool.registry().unregister(conn_id).await;
+    buffer_pool.trim_to(buffer_pool.max_buffers().min(64));
     result
 }
 
