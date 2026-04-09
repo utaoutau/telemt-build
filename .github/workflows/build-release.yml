@@ -20,27 +20,9 @@ jobs:
         platform: 
           - {
               os: linux,
-              arch: x86,
-              libc: gnu,
-              target: i686-unknown-linux-gnu
-            }
-          - {
-              os: linux,
               arch: x86_64,
               libc: gnu,
               target: x86_64-unknown-linux-gnu
-            }
-          - {
-              os: linux,
-              arch: armv6,
-              libc: gnu,
-              target: arm-unknown-linux-gnueabihf
-            }
-          - {
-              os: linux,
-              arch: armv7,
-              libc: gnu,
-              target: armv7-unknown-linux-gnueabihf
             }
           - {
               os: linux,
