@@ -575,6 +575,139 @@ async fn render_metrics(
         }
     );
 
+    let limiter_metrics = shared_state.traffic_limiter.metrics_snapshot();
+    let _ = writeln!(
+        out,
+        "# HELP telemt_rate_limiter_throttle_total Traffic limiter throttle events by scope and direction"
+    );
+    let _ = writeln!(out, "# TYPE telemt_rate_limiter_throttle_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_throttle_total{{scope=\"user\",direction=\"up\"}} {}",
+        if core_enabled {
+            limiter_metrics.user_throttle_up_total
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_throttle_total{{scope=\"user\",direction=\"down\"}} {}",
+        if core_enabled {
+            limiter_metrics.user_throttle_down_total
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_throttle_total{{scope=\"cidr\",direction=\"up\"}} {}",
+        if core_enabled {
+            limiter_metrics.cidr_throttle_up_total
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_throttle_total{{scope=\"cidr\",direction=\"down\"}} {}",
+        if core_enabled {
+            limiter_metrics.cidr_throttle_down_total
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_rate_limiter_wait_ms_total Traffic limiter accumulated wait time in milliseconds by scope and direction"
+    );
+    let _ = writeln!(out, "# TYPE telemt_rate_limiter_wait_ms_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_wait_ms_total{{scope=\"user\",direction=\"up\"}} {}",
+        if core_enabled {
+            limiter_metrics.user_wait_up_ms_total
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_wait_ms_total{{scope=\"user\",direction=\"down\"}} {}",
+        if core_enabled {
+            limiter_metrics.user_wait_down_ms_total
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_wait_ms_total{{scope=\"cidr\",direction=\"up\"}} {}",
+        if core_enabled {
+            limiter_metrics.cidr_wait_up_ms_total
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_wait_ms_total{{scope=\"cidr\",direction=\"down\"}} {}",
+        if core_enabled {
+            limiter_metrics.cidr_wait_down_ms_total
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_rate_limiter_active_leases Active relay leases under rate limiting by scope"
+    );
+    let _ = writeln!(out, "# TYPE telemt_rate_limiter_active_leases gauge");
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_active_leases{{scope=\"user\"}} {}",
+        if core_enabled {
+            limiter_metrics.user_active_leases
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_active_leases{{scope=\"cidr\"}} {}",
+        if core_enabled {
+            limiter_metrics.cidr_active_leases
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_rate_limiter_policy_entries Active rate-limit policy entries by scope"
+    );
+    let _ = writeln!(out, "# TYPE telemt_rate_limiter_policy_entries gauge");
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_policy_entries{{scope=\"user\"}} {}",
+        if core_enabled {
+            limiter_metrics.user_policy_entries
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_rate_limiter_policy_entries{{scope=\"cidr\"}} {}",
+        if core_enabled {
+            limiter_metrics.cidr_policy_entries
+        } else {
+            0
+        }
+    );
+
     let _ = writeln!(
         out,
         "# HELP telemt_upstream_connect_attempt_total Upstream connect attempts across all requests"

@@ -28,6 +28,7 @@ use crate::proxy::route_mode::{
 use crate::proxy::shared_state::{
     ConntrackCloseEvent, ConntrackClosePublishResult, ConntrackCloseReason, ProxySharedState,
 };
+use crate::proxy::traffic_limiter::{RateDirection, TrafficLease, next_refill_delay};
 use crate::stats::{
     MeD2cFlushReason, MeD2cQuotaRejectStage, MeD2cWriteMode, QuotaReserveError, Stats, UserStats,
 };
@@ -595,6 +596,41 @@ async fn reserve_user_quota_with_yield(
     }
 }
 
+async fn wait_for_traffic_budget(
+    lease: Option<&Arc<TrafficLease>>,
+    direction: RateDirection,
+    bytes: u64,
+) {
+    if bytes == 0 {
+        return;
+    }
+    let Some(lease) = lease else {
+        return;
+    };
+
+    let mut remaining = bytes;
+    while remaining > 0 {
+        let consume = lease.try_consume(direction, remaining);
+        if consume.granted > 0 {
+            remaining = remaining.saturating_sub(consume.granted);
+            continue;
+        }
+
+        let wait_started_at = Instant::now();
+        tokio::time::sleep(next_refill_delay()).await;
+        let wait_ms = wait_started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        lease.observe_wait_ms(
+            direction,
+            consume.blocked_user,
+            consume.blocked_cidr,
+            wait_ms,
+        );
+    }
+}
+
 fn classify_me_d2c_flush_reason(
     flush_immediately: bool,
     batch_frames: usize,
@@ -985,6 +1021,7 @@ where
     let quota_limit = config.access.user_data_quota.get(&user).copied();
     let quota_user_stats = quota_limit.map(|_| stats.get_or_create_user_stats_handle(&user));
     let peer = success.peer;
+    let traffic_lease = shared.traffic_limiter.acquire_lease(&user, peer.ip());
     let proto_tag = success.proto_tag;
     let pool_generation = me_pool.current_generation();
 
@@ -1120,6 +1157,7 @@ where
     let rng_clone = rng.clone();
     let user_clone = user.clone();
     let quota_user_stats_me_writer = quota_user_stats.clone();
+    let traffic_lease_me_writer = traffic_lease.clone();
     let last_downstream_activity_ms_clone = last_downstream_activity_ms.clone();
     let bytes_me2c_clone = bytes_me2c.clone();
     let d2c_flush_policy = MeD2cFlushPolicy::from_config(&config);
@@ -1153,7 +1191,7 @@ where
 
                     let first_is_downstream_activity =
                         matches!(&first, MeResponse::Data { .. } | MeResponse::Ack(_));
-                    match process_me_writer_response(
+                    match process_me_writer_response_with_traffic_lease(
                         first,
                         &mut writer,
                         proto_tag,
@@ -1164,6 +1202,7 @@ where
                         quota_user_stats_me_writer.as_deref(),
                         quota_limit,
                         d2c_flush_policy.quota_soft_overshoot_bytes,
+                        traffic_lease_me_writer.as_ref(),
                         bytes_me2c_clone.as_ref(),
                         conn_id,
                         d2c_flush_policy.ack_flush_immediate,
@@ -1213,7 +1252,7 @@ where
 
                         let next_is_downstream_activity =
                             matches!(&next, MeResponse::Data { .. } | MeResponse::Ack(_));
-                        match process_me_writer_response(
+                        match process_me_writer_response_with_traffic_lease(
                             next,
                             &mut writer,
                             proto_tag,
@@ -1224,6 +1263,7 @@ where
                             quota_user_stats_me_writer.as_deref(),
                             quota_limit,
                             d2c_flush_policy.quota_soft_overshoot_bytes,
+                            traffic_lease_me_writer.as_ref(),
                             bytes_me2c_clone.as_ref(),
                             conn_id,
                             d2c_flush_policy.ack_flush_immediate,
@@ -1276,7 +1316,7 @@ where
                             Ok(Some(next)) => {
                                 let next_is_downstream_activity =
                                     matches!(&next, MeResponse::Data { .. } | MeResponse::Ack(_));
-                                match process_me_writer_response(
+                                match process_me_writer_response_with_traffic_lease(
                                     next,
                                     &mut writer,
                                     proto_tag,
@@ -1287,6 +1327,7 @@ where
                                     quota_user_stats_me_writer.as_deref(),
                                     quota_limit,
                                     d2c_flush_policy.quota_soft_overshoot_bytes,
+                                    traffic_lease_me_writer.as_ref(),
                                     bytes_me2c_clone.as_ref(),
                                     conn_id,
                                     d2c_flush_policy.ack_flush_immediate,
@@ -1341,7 +1382,7 @@ where
 
                                     let extra_is_downstream_activity =
                                         matches!(&extra, MeResponse::Data { .. } | MeResponse::Ack(_));
-                                    match process_me_writer_response(
+                                    match process_me_writer_response_with_traffic_lease(
                                         extra,
                                         &mut writer,
                                         proto_tag,
@@ -1352,6 +1393,7 @@ where
                                         quota_user_stats_me_writer.as_deref(),
                                         quota_limit,
                                         d2c_flush_policy.quota_soft_overshoot_bytes,
+                                        traffic_lease_me_writer.as_ref(),
                                         bytes_me2c_clone.as_ref(),
                                         conn_id,
                                         d2c_flush_policy.ack_flush_immediate,
@@ -1542,6 +1584,12 @@ where
                 match payload_result {
                     Ok(Some((payload, quickack))) => {
                         trace!(conn_id, bytes = payload.len(), "C->ME frame");
+                        wait_for_traffic_budget(
+                            traffic_lease.as_ref(),
+                            RateDirection::Up,
+                            payload.len() as u64,
+                        )
+                        .await;
                         forensics.bytes_c2me = forensics
                             .bytes_c2me
                             .saturating_add(payload.len() as u64);
@@ -2163,6 +2211,46 @@ async fn process_me_writer_response<W>(
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    process_me_writer_response_with_traffic_lease(
+        response,
+        client_writer,
+        proto_tag,
+        rng,
+        frame_buf,
+        stats,
+        user,
+        quota_user_stats,
+        quota_limit,
+        quota_soft_overshoot_bytes,
+        None,
+        bytes_me2c,
+        conn_id,
+        ack_flush_immediate,
+        batched,
+    )
+    .await
+}
+
+async fn process_me_writer_response_with_traffic_lease<W>(
+    response: MeResponse,
+    client_writer: &mut CryptoWriter<W>,
+    proto_tag: ProtoTag,
+    rng: &SecureRandom,
+    frame_buf: &mut Vec<u8>,
+    stats: &Stats,
+    user: &str,
+    quota_user_stats: Option<&UserStats>,
+    quota_limit: Option<u64>,
+    quota_soft_overshoot_bytes: u64,
+    traffic_lease: Option<&Arc<TrafficLease>>,
+    bytes_me2c: &AtomicU64,
+    conn_id: u64,
+    ack_flush_immediate: bool,
+    batched: bool,
+) -> Result<MeWriterResponseOutcome>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     match response {
         MeResponse::Data { flags, data } => {
             if batched {
@@ -2183,6 +2271,7 @@ where
                     });
                 }
             }
+            wait_for_traffic_budget(traffic_lease, RateDirection::Down, data_len).await;
 
             let write_mode =
                 match write_client_payload(client_writer, proto_tag, flags, &data, rng, frame_buf)
@@ -2220,6 +2309,7 @@ where
             } else {
                 trace!(conn_id, confirm, "ME->C quickack");
             }
+            wait_for_traffic_budget(traffic_lease, RateDirection::Down, 4).await;
             write_client_ack(client_writer, proto_tag, confirm).await?;
             stats.increment_me_d2c_ack_frames_total();
 
