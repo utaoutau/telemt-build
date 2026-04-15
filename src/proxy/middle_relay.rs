@@ -287,6 +287,10 @@ impl RelayClientIdleState {
         self.last_client_frame_at = now;
         self.soft_idle_marked = false;
     }
+
+    fn on_client_tiny_frame(&mut self, now: Instant) {
+        self.last_client_frame_at = now;
+    }
 }
 
 impl MeD2cFlushPolicy {
@@ -1989,6 +1993,7 @@ where
         };
 
         if len == 0 {
+            idle_state.on_client_tiny_frame(Instant::now());
             idle_state.tiny_frame_debt = idle_state
                 .tiny_frame_debt
                 .saturating_add(TINY_FRAME_DEBT_PER_TINY);
