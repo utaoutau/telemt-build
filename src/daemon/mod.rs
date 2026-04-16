@@ -9,6 +9,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{Flock, FlockArg};
+use nix::errno::Errno;
 use nix::unistd::{self, ForkResult, Gid, Pid, Uid, chdir, close, fork, getpid, setsid};
 use tracing::{debug, info, warn};
 
@@ -337,6 +338,31 @@ fn is_process_running(pid: i32) -> bool {
     nix::sys::signal::kill(Pid::from_raw(pid), None).is_ok()
 }
 
+// macOS gates nix::unistd::setgroups differently in the current dependency set,
+// so call libc directly there while preserving the original nix path elsewhere.
+fn set_supplementary_groups(gid: Gid) -> Result<(), nix::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        let groups = [gid.as_raw()];
+        let rc = unsafe {
+            libc::setgroups(
+                i32::try_from(groups.len()).expect("single supplementary group must fit in c_int"),
+                groups.as_ptr(),
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(Errno::last())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        unistd::setgroups(&[gid])
+    }
+}
+
 /// Drops privileges to the specified user and group.
 ///
 /// This should be called after binding privileged ports but before entering
@@ -368,7 +394,7 @@ pub fn drop_privileges(
 
     if let Some(gid) = target_gid {
         unistd::setgid(gid).map_err(DaemonError::PrivilegeDrop)?;
-        unistd::setgroups(&[gid]).map_err(DaemonError::PrivilegeDrop)?;
+        set_supplementary_groups(gid).map_err(DaemonError::PrivilegeDrop)?;
         info!(gid = gid.as_raw(), "Dropped group privileges");
     }
 
