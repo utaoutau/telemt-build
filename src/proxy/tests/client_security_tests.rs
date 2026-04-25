@@ -281,13 +281,8 @@ async fn user_connection_reservation_drop_enqueues_cleanup_synchronously() {
     assert_eq!(ip_tracker.get_active_ip_count(&user).await, 1);
     assert_eq!(stats.get_user_curr_connects(&user), 1);
 
-    let reservation = UserConnectionReservation::new(
-        stats.clone(),
-        ip_tracker.clone(),
-        user.clone(),
-        ip,
-        true,
-    );
+    let reservation =
+        UserConnectionReservation::new(stats.clone(), ip_tracker.clone(), user.clone(), ip, true);
 
     // Drop the reservation synchronously without any tokio::spawn/await yielding!
     drop(reservation);
