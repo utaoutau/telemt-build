@@ -2106,6 +2106,20 @@ async fn render_metrics(
             0
         }
     );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_session_drop_fallback_total Session reservations cleaned by Drop instead of explicit async release"
+    );
+    let _ = writeln!(out, "# TYPE telemt_session_drop_fallback_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_session_drop_fallback_total {}",
+        if core_enabled {
+            stats.get_session_drop_fallback_total()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(
         out,

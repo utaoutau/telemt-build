@@ -1310,7 +1310,7 @@ where
                     let Some(first) = msg else {
                         debug!(conn_id, "ME channel closed");
                         shrink_session_vec(&mut frame_buf, shrink_threshold);
-                        return Err(ProxyError::Proxy("ME connection lost".into()));
+                        return Err(ProxyError::MiddleConnectionLost);
                     };
 
                     let mut batch_frames = 0usize;
@@ -1575,7 +1575,7 @@ where
                             Ok(None) => {
                                 debug!(conn_id, "ME channel closed");
                                 shrink_session_vec(&mut frame_buf, shrink_threshold);
-                                return Err(ProxyError::Proxy("ME connection lost".into()));
+                                return Err(ProxyError::MiddleConnectionLost);
                             }
                             Err(_) => {
                                 max_delay_fired = true;
@@ -1853,10 +1853,7 @@ where
 
     // When client closes, but ME channel stopped as unregistered - it isnt error
     if client_closed
-        && matches!(
-            writer_result,
-            Err(ProxyError::Proxy(ref msg)) if msg == "ME connection lost"
-        )
+        && matches!(writer_result, Err(ProxyError::MiddleConnectionLost))
     {
         writer_result = Ok(());
     }

@@ -32,7 +32,13 @@ struct UserConnectionReservation {
     user: String,
     ip: IpAddr,
     tracks_ip: bool,
-    active: bool,
+    state: SessionReservationState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionReservationState {
+    Active,
+    Released,
 }
 
 impl UserConnectionReservation {
@@ -49,28 +55,29 @@ impl UserConnectionReservation {
             user,
             ip,
             tracks_ip,
-            active: true,
+            state: SessionReservationState::Active,
         }
     }
 
     async fn release(mut self) {
-        if !self.active {
+        if self.state != SessionReservationState::Active {
             return;
         }
         if self.tracks_ip {
             self.ip_tracker.remove_ip(&self.user, self.ip).await;
         }
-        self.active = false;
+        self.state = SessionReservationState::Released;
         self.stats.decrement_user_curr_connects(&self.user);
     }
 }
 
 impl Drop for UserConnectionReservation {
     fn drop(&mut self) {
-        if !self.active {
+        if self.state != SessionReservationState::Active {
             return;
         }
-        self.active = false;
+        self.state = SessionReservationState::Released;
+        self.stats.increment_session_drop_fallback_total();
         self.stats.decrement_user_curr_connects(&self.user);
         if self.tracks_ip {
             self.ip_tracker.enqueue_cleanup(self.user.clone(), self.ip);

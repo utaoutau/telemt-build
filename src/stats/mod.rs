@@ -285,6 +285,7 @@ pub struct Stats {
     flow_wait_middle_rate_limit_total: AtomicU64,
     flow_wait_middle_rate_limit_cancelled_total: AtomicU64,
     flow_wait_middle_rate_limit_ms_total: AtomicU64,
+    session_drop_fallback_total: AtomicU64,
     telemetry_core_enabled: AtomicBool,
     telemetry_user_enabled: AtomicBool,
     telemetry_me_level: AtomicU8,
@@ -1530,6 +1531,12 @@ impl Stats {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn increment_session_drop_fallback_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.session_drop_fallback_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_endpoint_quarantine_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_endpoint_quarantine_total
@@ -2400,6 +2407,9 @@ impl Stats {
     pub fn get_flow_wait_middle_rate_limit_ms_total(&self) -> u64 {
         self.flow_wait_middle_rate_limit_ms_total
             .load(Ordering::Relaxed)
+    }
+    pub fn get_session_drop_fallback_total(&self) -> u64 {
+        self.session_drop_fallback_total.load(Ordering::Relaxed)
     }
 
     pub fn increment_user_connects(&self, user: &str) {

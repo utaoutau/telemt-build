@@ -222,6 +222,9 @@ pub enum ProxyError {
     #[error("Proxy error: {0}")]
     Proxy(String),
 
+    #[error("ME connection lost")]
+    MiddleConnectionLost,
+
     // ============= Config Errors =============
     #[error("Config error: {0}")]
     Config(String),

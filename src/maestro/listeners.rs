@@ -494,7 +494,7 @@ pub(crate) fn spawn_tcp_accept_loops(
 
                                 let me_closed = matches!(
                                     &e,
-                                    crate::error::ProxyError::Proxy(msg) if msg == "ME connection lost"
+                                    crate::error::ProxyError::MiddleConnectionLost
                                 );
                                 let route_switched = matches!(
                                     &e,
