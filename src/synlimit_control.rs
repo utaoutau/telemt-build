@@ -11,18 +11,17 @@ use tracing::warn;
 use crate::config::{ProxyConfig, SynLimitMode};
 
 const IPTABLES_CHAIN: &str = "TELEMT_SYNLIMIT";
-const IPTABLES_RECENT_NAME: &str = "telemt";
+const IPTABLES_HASHLIMIT_NAME: &str = "TELEMT-BUMPER";
 const NFT_TABLE: &str = "telemt_synlimit";
 const NFT_CHAIN: &str = "input";
-const NFT_SET_V4: &str = "telemt_synlimit_v4";
-const NFT_SET_V6: &str = "telemt_synlimit_v6";
+type SynLimitTarget = (Option<IpAddr>, u16, u32, u32, u32);
 
 #[derive(Default)]
 struct SynLimitTargets {
-    iptables_v4: Vec<(Option<IpAddr>, u16, u32, u32)>,
-    iptables_v6: Vec<(Option<IpAddr>, u16, u32, u32)>,
-    nft_v4: Vec<(Option<IpAddr>, u16)>,
-    nft_v6: Vec<(Option<IpAddr>, u16)>,
+    iptables_v4: Vec<SynLimitTarget>,
+    iptables_v6: Vec<SynLimitTarget>,
+    nft_v4: Vec<SynLimitTarget>,
+    nft_v6: Vec<SynLimitTarget>,
 }
 
 #[derive(Clone, Copy)]
@@ -41,8 +40,8 @@ enum NftFamily {
 
 struct NftApplyPlan<'a> {
     family: NftFamily,
-    v4_targets: &'a [(Option<IpAddr>, u16)],
-    v6_targets: &'a [(Option<IpAddr>, u16)],
+    v4_targets: &'a [SynLimitTarget],
+    v6_targets: &'a [SynLimitTarget],
 }
 
 impl SynLimitTargets {
@@ -61,7 +60,6 @@ impl SynLimitTargets {
         !self.nft_v4.is_empty() || !self.nft_v6.is_empty()
     }
 }
-
 impl NftFamily {
     fn as_str(self) -> &'static str {
         match self {
@@ -146,19 +144,20 @@ fn synlimit_targets(cfg: &ProxyConfig) -> SynLimitTargets {
         let ip = (!listener.ip.is_unspecified()).then_some(listener.ip);
         let seconds = listener.synlimit_seconds;
         let hitcount = listener.synlimit_hitcount;
+        let burst = listener.synlimit_burst;
 
         match (backend, listener.ip.is_ipv4()) {
             (SynLimitMode::Iptables, true) => {
-                iptables_v4.insert((ip, port, seconds, hitcount));
+                iptables_v4.insert((ip, port, seconds, hitcount, burst));
             }
             (SynLimitMode::Iptables, false) => {
-                iptables_v6.insert((ip, port, seconds, hitcount));
+                iptables_v6.insert((ip, port, seconds, hitcount, burst));
             }
             (SynLimitMode::Nftables, true) => {
-                nft_v4.insert((ip, port));
+                nft_v4.insert((ip, port, seconds, hitcount, burst));
             }
             (SynLimitMode::Nftables, false) => {
-                nft_v6.insert((ip, port));
+                nft_v6.insert((ip, port, seconds, hitcount, burst));
             }
             (SynLimitMode::Off, _) => {}
         }
@@ -179,7 +178,7 @@ async fn apply_iptables_synlimit_rules(targets: &SynLimitTargets) -> Result<(), 
 
 async fn apply_iptables_synlimit_rules_for_binary(
     binary: &str,
-    targets: &[(Option<IpAddr>, u16, u32, u32)],
+    targets: &[SynLimitTarget],
 ) -> Result<(), String> {
     if targets.is_empty() {
         return Ok(());
@@ -188,7 +187,7 @@ async fn apply_iptables_synlimit_rules_for_binary(
         return Err(format!("{binary} is not available"));
     }
 
-    run_command(binary, &["-t", "filter", "-N", IPTABLES_CHAIN], None).await?;
+    let _ = run_command(binary, &["-t", "filter", "-N", IPTABLES_CHAIN], None).await;
     run_command(binary, &["-t", "filter", "-F", IPTABLES_CHAIN], None).await?;
     if run_command(
         binary,
@@ -206,28 +205,71 @@ async fn apply_iptables_synlimit_rules_for_binary(
         .await?;
     }
 
-    for (ip, port, seconds, hitcount) in targets {
-        let drop_args =
-            iptables_synlimit_rule_args(ip, *port, *seconds, *hitcount, "--rcheck", "DROP");
-        let accept_args =
-            iptables_synlimit_rule_args(ip, *port, *seconds, *hitcount, "--set", "ACCEPT");
+    for (idx, (ip, port, seconds, hitcount, burst)) in targets.iter().enumerate() {
+        let hashlimit_name = format!("{IPTABLES_HASHLIMIT_NAME}-{idx}");
+        let accept_args = iptables_hashlimit_accept_rule_args(
+            ip,
+            *port,
+            *seconds,
+            *hitcount,
+            *burst,
+            &hashlimit_name,
+        );
+        let drop_args = iptables_synlimit_drop_rule_args(ip, *port);
         let drop_refs: Vec<&str> = drop_args.iter().map(String::as_str).collect();
         let accept_refs: Vec<&str> = accept_args.iter().map(String::as_str).collect();
-        run_command(binary, &drop_refs, None).await?;
         run_command(binary, &accept_refs, None).await?;
+        run_command(binary, &drop_refs, None).await?;
     }
+    run_command(binary, &["-t", "filter", "-A", IPTABLES_CHAIN, "-j", "RETURN"], None).await?;
 
     Ok(())
 }
 
-fn iptables_synlimit_rule_args(
+fn iptables_hashlimit_accept_rule_args(
     ip: &Option<IpAddr>,
     port: u16,
     seconds: u32,
     hitcount: u32,
-    recent_op: &str,
-    verdict: &str,
+    burst: u32,
+    hashlimit_name: &str,
 ) -> Vec<String> {
+    let mut args = vec![
+        "-t".to_string(),
+        "filter".to_string(),
+        "-A".to_string(),
+        IPTABLES_CHAIN.to_string(),
+        "-p".to_string(),
+        "tcp".to_string(),
+        "--syn".to_string(),
+    ];
+    if let Some(ip) = ip {
+        args.push("-d".to_string());
+        args.push(ip.to_string());
+    }
+    let rate = synlimit_rate_arg(seconds, hitcount);
+    args.extend([
+        "--dport".to_string(),
+        port.to_string(),
+        "-m".to_string(),
+        "hashlimit".to_string(),
+        "--hashlimit-name".to_string(),
+        hashlimit_name.to_string(),
+        "--hashlimit-mode".to_string(),
+        "srcip".to_string(),
+        "--hashlimit-upto".to_string(),
+        rate,
+        "--hashlimit-burst".to_string(),
+        burst.to_string(),
+        "--hashlimit-htable-expire".to_string(),
+        "15000".to_string(),
+        "-j".to_string(),
+        "ACCEPT".to_string(),
+    ]);
+    args
+}
+
+fn iptables_synlimit_drop_rule_args(ip: &Option<IpAddr>, port: u16) -> Vec<String> {
     let mut args = vec![
         "-t".to_string(),
         "filter".to_string(),
@@ -244,22 +286,31 @@ fn iptables_synlimit_rule_args(
     args.extend([
         "--dport".to_string(),
         port.to_string(),
-        "-m".to_string(),
-        "recent".to_string(),
-        "--name".to_string(),
-        IPTABLES_RECENT_NAME.to_string(),
-        recent_op.to_string(),
+        "-j".to_string(),
+        "DROP".to_string(),
     ]);
-    if recent_op == "--rcheck" {
-        args.extend([
-            "--seconds".to_string(),
-            seconds.to_string(),
-            "--hitcount".to_string(),
-            hitcount.to_string(),
-        ]);
-    }
-    args.extend(["-j".to_string(), verdict.to_string()]);
     args
+}
+
+fn synlimit_rate_arg(seconds: u32, hitcount: u32) -> String {
+    let seconds = u64::from(seconds.max(1));
+    let hitcount = u64::from(hitcount.max(1));
+    for (unit_seconds, unit_name) in [
+        (1_u64, "second"),
+        (60_u64, "minute"),
+        (3_600_u64, "hour"),
+        (86_400_u64, "day"),
+    ] {
+        let amount = hitcount.saturating_mul(unit_seconds);
+        if amount >= seconds && amount % seconds == 0 {
+            return format!("{}/{}", amount / seconds, unit_name);
+        }
+    }
+    let amount = hitcount
+        .saturating_mul(86_400)
+        .saturating_add(seconds - 1)
+        / seconds;
+    format!("{}/day", amount.max(1))
 }
 
 async fn clear_iptables_synlimit_rules_for_binary(binary: &str) {
@@ -324,11 +375,10 @@ async fn detect_nft_table_families() -> NftTableFamilies {
     }
     families
 }
-
 fn nft_apply_plan<'a>(
     families: NftTableFamilies,
-    v4_targets: &'a [(Option<IpAddr>, u16)],
-    v6_targets: &'a [(Option<IpAddr>, u16)],
+    v4_targets: &'a [SynLimitTarget],
+    v6_targets: &'a [SynLimitTarget],
 ) -> Vec<NftApplyPlan<'a>> {
     if !v4_targets.is_empty() && !v6_targets.is_empty() {
         return vec![NftApplyPlan {
@@ -361,44 +411,33 @@ fn nft_apply_plan<'a>(
     }
     Vec::new()
 }
-
 fn nft_synlimit_script(plan: NftApplyPlan<'_>) -> String {
     let mut script = String::new();
     script.push_str(&format!("table {} {NFT_TABLE} {{\n", plan.family.as_str()));
-    if !plan.v4_targets.is_empty() {
-        script.push_str(&format!("  set {NFT_SET_V4} {{\n"));
-        script.push_str("    type ipv4_addr\n");
-        script.push_str("    flags timeout\n");
-        script.push_str("  }\n");
-    }
-    if !plan.v6_targets.is_empty() {
-        script.push_str(&format!("  set {NFT_SET_V6} {{\n"));
-        script.push_str("    type ipv6_addr\n");
-        script.push_str("    flags timeout\n");
-        script.push_str("  }\n");
-    }
     script.push_str(&format!("  chain {NFT_CHAIN} {{\n"));
     script.push_str("    type filter hook input priority filter; policy accept;\n");
-    for (ip, port) in plan.v4_targets {
+    for (idx, (ip, port, seconds, hitcount, burst)) in plan.v4_targets.iter().enumerate() {
         let daddr = ip
             .map(|ip| format!(" ip daddr {ip}"))
             .unwrap_or_else(String::new);
+        let rate = synlimit_rate_arg(*seconds, *hitcount);
         script.push_str(&format!(
-            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} ip saddr @{NFT_SET_V4} drop\n"
+            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} meter telemt_synlimit_v4_{idx} {{ ip saddr limit rate over {rate} burst {burst} packets }} drop\n"
         ));
         script.push_str(&format!(
-            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} add @{NFT_SET_V4} {{ ip saddr timeout 1s }} accept\n"
+            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} accept\n"
         ));
     }
-    for (ip, port) in plan.v6_targets {
+    for (idx, (ip, port, seconds, hitcount, burst)) in plan.v6_targets.iter().enumerate() {
         let daddr = ip
             .map(|ip| format!(" ip6 daddr {ip}"))
             .unwrap_or_else(String::new);
+        let rate = synlimit_rate_arg(*seconds, *hitcount);
         script.push_str(&format!(
-            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} ip6 saddr @{NFT_SET_V6} drop\n"
+            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} meter telemt_synlimit_v6_{idx} {{ ip6 saddr limit rate over {rate} burst {burst} packets }} drop\n"
         ));
         script.push_str(&format!(
-            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} add @{NFT_SET_V6} {{ ip6 saddr timeout 1s }} accept\n"
+            "    tcp flags & (fin|syn|rst|ack) == syn{daddr} tcp dport {port} accept\n"
         ));
     }
     script.push_str("  }\n");

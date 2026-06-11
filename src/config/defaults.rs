@@ -56,6 +56,7 @@ const DEFAULT_CONNTRACK_PRESSURE_LOW_WATERMARK_PCT: u8 = 70;
 const DEFAULT_CONNTRACK_DELETE_BUDGET_PER_SEC: u64 = 4096;
 const DEFAULT_SYNLIMIT_SECONDS: u32 = 1;
 const DEFAULT_SYNLIMIT_HITCOUNT: u32 = 1;
+const DEFAULT_SYNLIMIT_BURST: u32 = 3;
 const DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS: u32 = 2;
 const DEFAULT_UPSTREAM_UNHEALTHY_FAIL_THRESHOLD: u32 = 5;
 const DEFAULT_UPSTREAM_CONNECT_BUDGET_MS: u64 = 3000;
@@ -251,6 +252,10 @@ pub(crate) fn default_synlimit_seconds() -> u32 {
 
 pub(crate) fn default_synlimit_hitcount() -> u32 {
     DEFAULT_SYNLIMIT_HITCOUNT
+}
+
+pub(crate) fn default_synlimit_burst() -> u32 {
+    DEFAULT_SYNLIMIT_BURST
 }
 
 pub(crate) fn default_prefer_4() -> u8 {

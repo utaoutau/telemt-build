@@ -349,6 +349,7 @@ const LISTENER_CONFIG_KEYS: &[&str] = &[
     "synlimit",
     "synlimit_seconds",
     "synlimit_hitcount",
+    "synlimit_burst",
     "announce",
     "announce_ip",
     "proxy_protocol",
@@ -1961,6 +1962,11 @@ impl ProxyConfig {
                     "server.listeners[{idx}].synlimit_hitcount must be > 0"
                 )));
             }
+            if listener.synlimit_burst == 0 {
+                return Err(ProxyError::Config(format!(
+                    "server.listeners[{idx}].synlimit_burst must be > 0"
+                )));
+            }
         }
 
         if config.server.accept_permit_timeout_ms > 60_000 {
@@ -2202,6 +2208,7 @@ impl ProxyConfig {
                     synlimit: SynLimitMode::default(),
                     synlimit_seconds: default_synlimit_seconds(),
                     synlimit_hitcount: default_synlimit_hitcount(),
+                    synlimit_burst: default_synlimit_burst(),
                     announce: None,
                     announce_ip: None,
                     proxy_protocol: None,
@@ -2218,6 +2225,7 @@ impl ProxyConfig {
                     synlimit: SynLimitMode::default(),
                     synlimit_seconds: default_synlimit_seconds(),
                     synlimit_hitcount: default_synlimit_hitcount(),
+                    synlimit_burst: default_synlimit_burst(),
                     announce: None,
                     announce_ip: None,
                     proxy_protocol: None,

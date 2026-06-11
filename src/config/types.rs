@@ -1375,9 +1375,9 @@ pub enum SynLimitMode {
     /// Disable SYN limiting for this listener.
     #[default]
     Off,
-    /// Use iptables/ip6tables filter rules with the recent match.
+    /// Use iptables/ip6tables filter rules with the hashlimit match.
     Iptables,
-    /// Use nftables rules with timeout-backed dynamic sets.
+    /// Use nftables rules with per-source token-bucket meters.
     Nftables,
 }
 
@@ -2176,12 +2176,15 @@ pub struct ListenerConfig {
     /// Per-listener SYN limiter mode.
     #[serde(default)]
     pub synlimit: SynLimitMode,
-    /// Iptables recent-match interval for the per-listener SYN limiter.
+    /// Token-bucket rate interval for the per-listener SYN limiter.
     #[serde(default = "default_synlimit_seconds")]
     pub synlimit_seconds: u32,
-    /// Iptables recent-match hit count for the per-listener SYN limiter.
+    /// Token-bucket rate amount for the per-listener SYN limiter.
     #[serde(default = "default_synlimit_hitcount")]
     pub synlimit_hitcount: u32,
+    /// Token-bucket burst size for the per-listener SYN limiter.
+    #[serde(default = "default_synlimit_burst")]
+    pub synlimit_burst: u32,
     /// IP address or hostname to announce in proxy links.
     /// Takes precedence over `announce_ip` if both are set.
     #[serde(default)]
