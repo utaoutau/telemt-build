@@ -1390,9 +1390,10 @@ async fn tls_bad_mtproto_fallback_large_multi_record_chaos_under_backpressure() 
     assert_eq!(tls_response_head[0], 0x16);
 
     let chaos = [5usize, 23, 11, 47, 3, 19, 29, 13, 7, 31];
-    let mut records = [&a, &b, &c].iter().copied();
+    let records = [&a, &b, &c];
+    let mut records_iter = records.iter().copied();
     let mut client_payload = invalid_mtproto_record;
-    if let Some(first_record) = records.next() {
+    if let Some(first_record) = records_iter.next() {
         let first_step = chaos[0].min(first_record.len());
         client_payload.extend_from_slice(&first_record[..first_step]);
         client_side.write_all(&client_payload).await.unwrap();
@@ -1410,7 +1411,7 @@ async fn tls_bad_mtproto_fallback_large_multi_record_chaos_under_backpressure() 
             idx += 1;
         }
     }
-    for record in records {
+    for record in records_iter {
         let mut pos = 0usize;
         let mut idx = 0usize;
         while pos < record.len() {
