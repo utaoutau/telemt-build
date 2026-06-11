@@ -109,7 +109,9 @@ pub(crate) async fn reconcile_synlimit_rules(cfg: &ProxyConfig) {
         return;
     }
     if !has_cap_net_admin() {
-        warn!("SYN limiter configured but CAP_NET_ADMIN is not available; netfilter rules not applied");
+        warn!(
+            "SYN limiter configured but CAP_NET_ADMIN is not available; netfilter rules not applied"
+        );
         return;
     }
 
@@ -519,7 +521,10 @@ fn clear_iptables_synlimit_rules_for_binary_sync(binary: &str) {
         return;
     }
     for _ in 0..8 {
-        if !run_command_sync(binary, &["-t", "filter", "-D", "INPUT", "-j", IPTABLES_CHAIN]) {
+        if !run_command_sync(
+            binary,
+            &["-t", "filter", "-D", "INPUT", "-j", IPTABLES_CHAIN],
+        ) {
             break;
         }
     }
