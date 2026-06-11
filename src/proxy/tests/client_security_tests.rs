@@ -3,7 +3,7 @@ use crate::config::{UpstreamConfig, UpstreamType};
 use crate::crypto::{AesCtr, sha256, sha256_hmac};
 use crate::protocol::constants::{
     DC_IDX_POS, HANDSHAKE_LEN, IV_LEN, PREKEY_LEN, PROTO_TAG_POS, ProtoTag, SKIP_LEN,
-    TLS_RECORD_CHANGE_CIPHER,
+    TLS_RECORD_CHANGE_CIPHER, TLS_VERSION,
 };
 use crate::protocol::tls;
 use crate::proxy::handshake::HandshakeSuccess;
@@ -1630,17 +1630,73 @@ fn make_valid_tls_client_hello_with_len(secret: &[u8], timestamp: u32, tls_len: 
         "TLS length must fit into record header"
     );
 
-    let total_len = 5 + tls_len;
-    let mut handshake = vec![0x42u8; total_len];
-
-    handshake[0] = 0x16;
-    handshake[1] = 0x03;
-    handshake[2] = 0x01;
-    handshake[3..5].copy_from_slice(&(tls_len as u16).to_be_bytes());
-
+    const TLS_AES_128_GCM_SHA256: [u8; 2] = [0x13, 0x01];
+    const TLS_EXTENSION_KEY_SHARE: u16 = 0x0033;
+    const TLS_EXTENSION_PADDING: u16 = 0x0015;
+    const X25519_KEY_SHARE_LEN: usize = 32;
+    let fill = 0x42u8;
     let session_id_len: usize = 32;
-    handshake[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = session_id_len as u8;
 
+    let mut extensions = Vec::new();
+    let mut key_share = Vec::new();
+    key_share.extend_from_slice(&tls::TLS_NAMED_GROUP_X25519.to_be_bytes());
+    key_share.extend_from_slice(&(X25519_KEY_SHARE_LEN as u16).to_be_bytes());
+    key_share.push(9);
+    key_share.resize(key_share.len() + X25519_KEY_SHARE_LEN - 1, 0);
+
+    let mut key_share_extension = Vec::new();
+    key_share_extension.extend_from_slice(&(key_share.len() as u16).to_be_bytes());
+    key_share_extension.extend_from_slice(&key_share);
+    extensions.extend_from_slice(&TLS_EXTENSION_KEY_SHARE.to_be_bytes());
+    extensions.extend_from_slice(&(key_share_extension.len() as u16).to_be_bytes());
+    extensions.extend_from_slice(&key_share_extension);
+
+    let base_tls_len = 4
+        + 2
+        + 32
+        + 1
+        + session_id_len
+        + 2
+        + TLS_AES_128_GCM_SHA256.len()
+        + 1
+        + 1
+        + 2
+        + extensions.len();
+    assert!(
+        tls_len == base_tls_len || tls_len >= base_tls_len + 4,
+        "TLS length must leave room for a complete padding extension"
+    );
+    if tls_len > base_tls_len {
+        let padding_len = tls_len - base_tls_len - 4;
+        extensions.extend_from_slice(&TLS_EXTENSION_PADDING.to_be_bytes());
+        extensions.extend_from_slice(&(padding_len as u16).to_be_bytes());
+        extensions.resize(extensions.len() + padding_len, fill);
+    }
+
+    let body_len = tls_len - 4;
+    let mut body = Vec::with_capacity(body_len);
+    body.extend_from_slice(&TLS_VERSION);
+    body.extend_from_slice(&[fill; 32]);
+    body.push(session_id_len as u8);
+    body.extend_from_slice(&[fill; 32]);
+    body.extend_from_slice(&(TLS_AES_128_GCM_SHA256.len() as u16).to_be_bytes());
+    body.extend_from_slice(&TLS_AES_128_GCM_SHA256);
+    body.push(1);
+    body.push(0);
+    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+    body.extend_from_slice(&extensions);
+    assert_eq!(body.len(), body_len);
+
+    let mut handshake = Vec::with_capacity(5 + tls_len);
+    handshake.push(0x16);
+    handshake.extend_from_slice(&[0x03, 0x01]);
+    handshake.extend_from_slice(&(tls_len as u16).to_be_bytes());
+    handshake.push(0x01);
+    let body_len_bytes = (body_len as u32).to_be_bytes();
+    handshake.extend_from_slice(&body_len_bytes[1..4]);
+    handshake.extend_from_slice(&body);
+
+    // The proxy authenticates TLS-fronted clients through the random field.
     handshake[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN].fill(0);
     let computed = sha256_hmac(secret, &handshake);
     let mut digest = computed;
@@ -1663,6 +1719,9 @@ fn make_valid_tls_client_hello_with_alpn(
     timestamp: u32,
     alpn_protocols: &[&[u8]],
 ) -> Vec<u8> {
+    const TLS_EXTENSION_KEY_SHARE: u16 = 0x0033;
+    const X25519_KEY_SHARE_LEN: usize = 32;
+
     let mut body = Vec::new();
     body.extend_from_slice(&TLS_VERSION);
     body.extend_from_slice(&[0u8; 32]);
@@ -1674,6 +1733,19 @@ fn make_valid_tls_client_hello_with_alpn(
     body.push(0);
 
     let mut ext_blob = Vec::new();
+    let mut key_share = Vec::new();
+    key_share.extend_from_slice(&tls::TLS_NAMED_GROUP_X25519.to_be_bytes());
+    key_share.extend_from_slice(&(X25519_KEY_SHARE_LEN as u16).to_be_bytes());
+    key_share.push(9);
+    key_share.resize(key_share.len() + X25519_KEY_SHARE_LEN - 1, 0);
+
+    let mut key_share_extension = Vec::new();
+    key_share_extension.extend_from_slice(&(key_share.len() as u16).to_be_bytes());
+    key_share_extension.extend_from_slice(&key_share);
+    ext_blob.extend_from_slice(&TLS_EXTENSION_KEY_SHARE.to_be_bytes());
+    ext_blob.extend_from_slice(&(key_share_extension.len() as u16).to_be_bytes());
+    ext_blob.extend_from_slice(&key_share_extension);
+
     if !alpn_protocols.is_empty() {
         let mut alpn_list = Vec::new();
         for proto in alpn_protocols {
@@ -2062,8 +2134,9 @@ async fn valid_tls_with_invalid_mtproto_falls_back_to_mask_backend() {
         .unwrap();
     assert_eq!(tls_response_head[0], 0x16);
 
-    client_side.write_all(&tls_app_record).await.unwrap();
-    client_side.write_all(&trailing_tls_record).await.unwrap();
+    let mut client_payload = tls_app_record;
+    client_payload.extend_from_slice(&trailing_tls_record);
+    client_side.write_all(&client_payload).await.unwrap();
 
     tokio::time::timeout(Duration::from_secs(3), accept_task)
         .await
@@ -2188,8 +2261,9 @@ async fn client_handler_tls_bad_mtproto_is_forwarded_to_mask_backend() {
     client.read_exact(&mut tls_response_head).await.unwrap();
     assert_eq!(tls_response_head[0], 0x16);
 
-    client.write_all(&tls_app_record).await.unwrap();
-    client.write_all(&trailing_tls_record).await.unwrap();
+    let mut client_payload = tls_app_record;
+    client_payload.extend_from_slice(&trailing_tls_record);
+    client.write_all(&client_payload).await.unwrap();
 
     tokio::time::timeout(Duration::from_secs(3), mask_accept_task)
         .await

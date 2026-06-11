@@ -21,11 +21,59 @@ fn test_config_with_secret_hex(secret_hex: &str) -> ProxyConfig {
 }
 
 fn make_valid_tls_handshake(secret: &[u8], timestamp: u32) -> Vec<u8> {
+    const TLS_AES_128_GCM_SHA256: [u8; 2] = [0x13, 0x01];
+    const TLS_EXTENSION_KEY_SHARE: u16 = 0x0033;
+    const X25519_KEY_SHARE_LEN: usize = 32;
     let session_id_len: usize = 32;
-    let len = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1 + session_id_len;
-    let mut handshake = vec![0x42u8; len];
+    let fill = 0x42u8;
 
-    handshake[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = session_id_len as u8;
+    let mut extensions = Vec::new();
+    let mut key_share = Vec::new();
+    key_share.extend_from_slice(&tls::TLS_NAMED_GROUP_X25519.to_be_bytes());
+    key_share.extend_from_slice(&(X25519_KEY_SHARE_LEN as u16).to_be_bytes());
+    key_share.push(9);
+    key_share.resize(key_share.len() + X25519_KEY_SHARE_LEN - 1, 0);
+
+    let mut key_share_extension = Vec::new();
+    key_share_extension.extend_from_slice(&(key_share.len() as u16).to_be_bytes());
+    key_share_extension.extend_from_slice(&key_share);
+    extensions.extend_from_slice(&TLS_EXTENSION_KEY_SHARE.to_be_bytes());
+    extensions.extend_from_slice(&(key_share_extension.len() as u16).to_be_bytes());
+    extensions.extend_from_slice(&key_share_extension);
+
+    let body_len = 2
+        + 32
+        + 1
+        + session_id_len
+        + 2
+        + TLS_AES_128_GCM_SHA256.len()
+        + 1
+        + 1
+        + 2
+        + extensions.len();
+    let mut body = Vec::with_capacity(body_len);
+    body.extend_from_slice(&TLS_VERSION);
+    body.extend_from_slice(&[fill; 32]);
+    body.push(session_id_len as u8);
+    body.extend_from_slice(&[fill; 32]);
+    body.extend_from_slice(&(TLS_AES_128_GCM_SHA256.len() as u16).to_be_bytes());
+    body.extend_from_slice(&TLS_AES_128_GCM_SHA256);
+    body.push(1);
+    body.push(0);
+    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+    body.extend_from_slice(&extensions);
+    assert_eq!(body.len(), body_len);
+
+    let mut handshake = Vec::with_capacity(5 + 4 + body_len);
+    handshake.push(TLS_RECORD_HANDSHAKE);
+    handshake.extend_from_slice(&[0x03, 0x01]);
+    handshake.extend_from_slice(&((4 + body_len) as u16).to_be_bytes());
+    handshake.push(0x01);
+    let body_len_bytes = (body_len as u32).to_be_bytes();
+    handshake.extend_from_slice(&body_len_bytes[1..4]);
+    handshake.extend_from_slice(&body);
+
+    // The proxy authenticates TLS-fronted clients through the random field.
     handshake[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN].fill(0);
 
     let computed = sha256_hmac(secret, &handshake);
@@ -85,6 +133,9 @@ fn make_valid_tls_client_hello_with_alpn(
     timestamp: u32,
     alpn_protocols: &[&[u8]],
 ) -> Vec<u8> {
+    const TLS_EXTENSION_KEY_SHARE: u16 = 0x0033;
+    const X25519_KEY_SHARE_LEN: usize = 32;
+
     let mut body = Vec::new();
     body.extend_from_slice(&TLS_VERSION);
     body.extend_from_slice(&[0u8; 32]);
@@ -96,6 +147,19 @@ fn make_valid_tls_client_hello_with_alpn(
     body.push(0);
 
     let mut ext_blob = Vec::new();
+    let mut key_share = Vec::new();
+    key_share.extend_from_slice(&tls::TLS_NAMED_GROUP_X25519.to_be_bytes());
+    key_share.extend_from_slice(&(X25519_KEY_SHARE_LEN as u16).to_be_bytes());
+    key_share.push(9);
+    key_share.resize(key_share.len() + X25519_KEY_SHARE_LEN - 1, 0);
+
+    let mut key_share_extension = Vec::new();
+    key_share_extension.extend_from_slice(&(key_share.len() as u16).to_be_bytes());
+    key_share_extension.extend_from_slice(&key_share);
+    ext_blob.extend_from_slice(&TLS_EXTENSION_KEY_SHARE.to_be_bytes());
+    ext_blob.extend_from_slice(&(key_share_extension.len() as u16).to_be_bytes());
+    ext_blob.extend_from_slice(&key_share_extension);
+
     if !alpn_protocols.is_empty() {
         let mut alpn_list = Vec::new();
         for proto in alpn_protocols {
@@ -150,13 +214,7 @@ async fn tls_minimum_viable_length_boundary() {
     let rng = SecureRandom::new();
     let peer: SocketAddr = "192.0.2.1:12345".parse().unwrap();
 
-    let min_len = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 1;
-    let mut exact_min_handshake = vec![0x42u8; min_len];
-    exact_min_handshake[min_len - 1] = 0;
-    exact_min_handshake[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN].fill(0);
-    let digest = sha256_hmac(&secret, &exact_min_handshake);
-    exact_min_handshake[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN]
-        .copy_from_slice(&digest);
+    let exact_min_handshake = make_valid_tls_handshake(&secret, 0);
 
     let res = handle_tls_handshake(
         &exact_min_handshake,
@@ -171,12 +229,12 @@ async fn tls_minimum_viable_length_boundary() {
     .await;
     assert!(
         matches!(res, HandshakeResult::Success(_)),
-        "Exact minimum length TLS handshake must succeed"
+        "Minimum valid TLS ClientHello must succeed"
     );
 
-    let short_handshake = vec![0x42u8; min_len - 1];
+    let short_handshake = &exact_min_handshake[..exact_min_handshake.len() - 1];
     let res_short = handle_tls_handshake(
-        &short_handshake,
+        short_handshake,
         tokio::io::empty(),
         tokio::io::sink(),
         peer,
@@ -188,7 +246,7 @@ async fn tls_minimum_viable_length_boundary() {
     .await;
     assert!(
         matches!(res_short, HandshakeResult::BadClient { .. }),
-        "Handshake 1 byte shorter than minimum must fail closed"
+        "Handshake 1 byte shorter than minimum valid ClientHello must fail closed"
     );
 }
 

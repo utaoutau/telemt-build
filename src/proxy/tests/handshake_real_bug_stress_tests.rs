@@ -24,6 +24,9 @@ fn make_valid_tls_client_hello_with_alpn(
     timestamp: u32,
     alpn_protocols: &[&[u8]],
 ) -> Vec<u8> {
+    const TLS_EXTENSION_KEY_SHARE: u16 = 0x0033;
+    const X25519_KEY_SHARE_LEN: usize = 32;
+
     let mut body = Vec::new();
     body.extend_from_slice(&TLS_VERSION);
     body.extend_from_slice(&[0u8; 32]);
@@ -35,6 +38,19 @@ fn make_valid_tls_client_hello_with_alpn(
     body.push(0);
 
     let mut ext_blob = Vec::new();
+    let mut key_share = Vec::new();
+    key_share.extend_from_slice(&tls::TLS_NAMED_GROUP_X25519.to_be_bytes());
+    key_share.extend_from_slice(&(X25519_KEY_SHARE_LEN as u16).to_be_bytes());
+    key_share.push(9);
+    key_share.resize(key_share.len() + X25519_KEY_SHARE_LEN - 1, 0);
+
+    let mut key_share_extension = Vec::new();
+    key_share_extension.extend_from_slice(&(key_share.len() as u16).to_be_bytes());
+    key_share_extension.extend_from_slice(&key_share);
+    ext_blob.extend_from_slice(&TLS_EXTENSION_KEY_SHARE.to_be_bytes());
+    ext_blob.extend_from_slice(&(key_share_extension.len() as u16).to_be_bytes());
+    ext_blob.extend_from_slice(&key_share_extension);
+
     if !alpn_protocols.is_empty() {
         let mut alpn_list = Vec::new();
         for proto in alpn_protocols {
