@@ -465,7 +465,9 @@ fn profile_supported_versions(profile: TlsFetchProfile) -> &'static [u16] {
 
 fn profile_padding_target(profile: TlsFetchProfile) -> usize {
     match profile {
-        TlsFetchProfile::ModernChromeLike => 220,
+        // X25519MLKEM768 makes the Chrome-like ClientHello much larger than
+        // legacy pre-hybrid profiles; keep enough headroom for padding.
+        TlsFetchProfile::ModernChromeLike => 1450,
         TlsFetchProfile::ModernFirefoxLike => 200,
         TlsFetchProfile::CompatTls12 => 180,
         TlsFetchProfile::LegacyMinimal => 64,
