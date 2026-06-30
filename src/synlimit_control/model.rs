@@ -17,6 +17,13 @@ pub(super) struct SynLimitRule {
     pub(super) hashlimit_size: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SynLimitNamespace {
+    pub(super) nft_table: String,
+    pub(super) iptables_chain: String,
+    pub(super) iptables_hashlimit_prefix: String,
+}
+
 #[derive(Default)]
 pub(super) struct SynLimitTargets {
     pub(super) iptables_v4: Vec<SynLimitRule>,
@@ -39,6 +46,44 @@ impl SynLimitTargets {
 
     pub(super) fn has_nft_targets(&self) -> bool {
         !self.nft_v4.is_empty() || !self.nft_v6.is_empty()
+    }
+}
+
+struct SynLimitNamespaceHasher {
+    value: u64,
+}
+
+impl SynLimitNamespaceHasher {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self {
+            value: Self::OFFSET,
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.value ^= u64::from(*byte);
+            self.value = self.value.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write(&[value]);
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn finish(self) -> u64 {
+        self.value
     }
 }
 
@@ -89,6 +134,64 @@ pub(super) fn synlimit_targets(cfg: &ProxyConfig) -> SynLimitTargets {
         nft_v4: nft_v4.into_iter().collect(),
         nft_v6: nft_v6.into_iter().collect(),
     }
+}
+
+pub(super) fn synlimit_namespace(targets: &SynLimitTargets) -> Option<SynLimitNamespace> {
+    if targets.is_empty() {
+        return None;
+    }
+
+    let mut hasher = SynLimitNamespaceHasher::new();
+    write_namespace_rule_group(&mut hasher, b"iptables-v4", &targets.iptables_v4);
+    write_namespace_rule_group(&mut hasher, b"iptables-v6", &targets.iptables_v6);
+    write_namespace_rule_group(&mut hasher, b"nft-v4", &targets.nft_v4);
+    write_namespace_rule_group(&mut hasher, b"nft-v6", &targets.nft_v6);
+
+    let suffix = format!("{:016x}", hasher.finish());
+    let iptables_suffix = &suffix[..12];
+    let hashlimit_suffix = &suffix[..10];
+    Some(SynLimitNamespace {
+        nft_table: format!("telemt_synlimit_{suffix}"),
+        iptables_chain: format!("TMT_SYN_{iptables_suffix}"),
+        iptables_hashlimit_prefix: format!("TMT{hashlimit_suffix}"),
+    })
+}
+
+fn write_namespace_rule_group(
+    hasher: &mut SynLimitNamespaceHasher,
+    group: &[u8],
+    rules: &[SynLimitRule],
+) {
+    hasher.write(group);
+    hasher.write_u32(rules.len() as u32);
+    for rule in rules {
+        write_namespace_rule(hasher, rule);
+    }
+}
+
+fn write_namespace_rule(hasher: &mut SynLimitNamespaceHasher, rule: &SynLimitRule) {
+    match rule.ip {
+        Some(IpAddr::V4(ip)) => {
+            hasher.write_u8(4);
+            hasher.write(&ip.octets());
+        }
+        Some(IpAddr::V6(ip)) => {
+            hasher.write_u8(6);
+            hasher.write(&ip.octets());
+        }
+        None => {
+            hasher.write_u8(0);
+        }
+    }
+    hasher.write_u16(rule.port);
+    hasher.write_u32(rule.generic_seconds);
+    hasher.write_u32(rule.generic_hitcount);
+    hasher.write_u32(rule.generic_burst);
+    hasher.write_u32(rule.ios_seconds);
+    hasher.write_u32(rule.ios_hitcount);
+    hasher.write_u32(rule.ios_burst);
+    hasher.write_u32(rule.hashlimit_expire_ms);
+    hasher.write_u32(rule.hashlimit_size);
 }
 
 pub(super) fn synlimit_rate_arg(seconds: u32, hitcount: u32) -> String {
@@ -222,6 +325,31 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)))
         );
         assert_eq!(targets.nft_v6[0].ip, None);
+    }
+
+    #[test]
+    fn synlimit_namespace_is_stable_and_changes_by_targets() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.listeners = vec![listener(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            Some(443),
+            SynLimitMode::Nftables,
+        )];
+        let first = synlimit_namespace(&synlimit_targets(&cfg))
+            .expect("configured targets must have a namespace");
+        let second = synlimit_namespace(&synlimit_targets(&cfg))
+            .expect("configured targets must have a namespace");
+
+        cfg.server.listeners[0].port = Some(444);
+        let changed = synlimit_namespace(&synlimit_targets(&cfg))
+            .expect("configured targets must have a namespace");
+
+        assert_eq!(first, second);
+        assert_ne!(first, changed);
+        assert!(first.nft_table.starts_with("telemt_synlimit_"));
+        assert!(first.iptables_chain.starts_with("TMT_SYN_"));
+        assert!(first.iptables_chain.len() <= 28);
+        assert!(first.iptables_hashlimit_prefix.starts_with("TMT"));
     }
 
     #[test]
