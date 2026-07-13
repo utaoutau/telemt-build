@@ -77,13 +77,9 @@ impl ConnRegistry {
             .writer_idle_since_epoch_secs
             .entry(writer_id)
             .or_insert_with(Self::now_epoch_secs);
-        self.writers.map.insert(
-            writer_id,
-            super::WriterRoute {
-                tx,
-                byte_budget,
-            },
-        );
+        self.writers
+            .map
+            .insert(writer_id, super::WriterRoute { tx, byte_budget });
     }
 
     /// Unregister connection, returning associated writer_id if any.

@@ -1126,8 +1126,7 @@ impl Default for GeneralConfig {
                 default_me_d2c_frame_buf_shrink_threshold_bytes(),
             direct_relay_copy_buf_c2s_bytes: default_direct_relay_copy_buf_c2s_bytes(),
             direct_relay_copy_buf_s2c_bytes: default_direct_relay_copy_buf_s2c_bytes(),
-            direct_relay_buffer_budget_max_bytes:
-                default_direct_relay_buffer_budget_max_bytes(),
+            direct_relay_buffer_budget_max_bytes: default_direct_relay_buffer_budget_max_bytes(),
             me_warmup_stagger_enabled: default_true(),
             me_warmup_step_delay_ms: default_warmup_step_delay_ms(),
             me_warmup_step_jitter_ms: default_warmup_step_jitter_ms(),

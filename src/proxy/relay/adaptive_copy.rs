@@ -488,13 +488,8 @@ fn apply_global_pressure_demotion(
         return;
     }
     *controller = SessionAdaptiveController::new(target);
-    let sizes = direct_copy_buffers_for_tier_with_ceilings(
-        target,
-        base.0,
-        base.1,
-        ceilings.0,
-        ceilings.1,
-    );
+    let sizes =
+        direct_copy_buffers_for_tier_with_ceilings(target, base.0, base.1, ceilings.0, ceilings.1);
     set_desired_sizes(c2s_state, s2c_state, sizes);
     lease.set_tier(target.as_u8() as usize);
     budget.increment_global_pressure_demotion();

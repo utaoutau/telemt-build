@@ -145,8 +145,7 @@ me_writer_byte_budget_bytes = 268451840
 "#,
     );
 
-    let err =
-        ProxyConfig::load(&path).expect_err("writer byte budget above hard cap must fail");
+    let err = ProxyConfig::load(&path).expect_err("writer byte budget above hard cap must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("general.me_writer_byte_budget_bytes must be within [33570816, 268435456]"),
@@ -165,8 +164,7 @@ direct_relay_buffer_budget_max_bytes = 16777217
 "#,
     );
 
-    let err = ProxyConfig::load(&path)
-        .expect_err("unaligned direct relay buffer budget must fail");
+    let err = ProxyConfig::load(&path).expect_err("unaligned direct relay buffer budget must fail");
     assert!(
         err.to_string().contains(
             "general.direct_relay_buffer_budget_max_bytes must be 0 or a multiple of 4096"
@@ -184,8 +182,8 @@ direct_relay_buffer_budget_max_bytes = 2147487744
 "#,
     );
 
-    let err = ProxyConfig::load(&path)
-        .expect_err("direct relay buffer budget above hard cap must fail");
+    let err =
+        ProxyConfig::load(&path).expect_err("direct relay buffer budget above hard cap must fail");
     assert!(err.to_string().contains(
         "general.direct_relay_buffer_budget_max_bytes must be 0 or within [16777216, 2147483648]"
     ));

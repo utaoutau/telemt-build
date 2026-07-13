@@ -400,7 +400,10 @@ mod tests {
             .expect("writer byte permits must be available");
         let mut writer_permit = WriterBytePermit::new(permit, 32 * 1024, stats.clone());
 
-        assert_eq!(stats.get_me_writer_byte_budget_queued_bytes_gauge(), 32 * 1024);
+        assert_eq!(
+            stats.get_me_writer_byte_budget_queued_bytes_gauge(),
+            32 * 1024
+        );
         assert_eq!(stats.get_me_writer_byte_budget_inflight_bytes_gauge(), 0);
 
         writer_permit.mark_inflight();

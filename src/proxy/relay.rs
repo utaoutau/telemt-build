@@ -84,8 +84,8 @@ fn watchdog_delta(current: u64, previous: u64) -> u64 {
     current.saturating_sub(previous)
 }
 
-mod io;
 mod adaptive_copy;
+mod io;
 
 pub(crate) use self::adaptive_copy::relay_direct_adaptive;
 

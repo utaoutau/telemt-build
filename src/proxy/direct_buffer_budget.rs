@@ -170,11 +170,9 @@ impl DirectBufferBudget {
     }
 
     fn set_target_bytes(&self, target: u64) {
-        let target = align_down(
-            target
-                .clamp(self.target_floor_bytes(), self.hard_limit_bytes)
-                as usize,
-        ) as u64;
+        let target =
+            align_down(target.clamp(self.target_floor_bytes(), self.hard_limit_bytes) as usize)
+                as u64;
         let previous = self.target_bytes.swap(target, Ordering::AcqRel);
         if target < previous {
             let generation = self
@@ -196,8 +194,7 @@ impl DirectBufferBudget {
 
     /// Records a session that had to bypass the adaptive target at minimum size.
     pub(crate) fn increment_minimum_fallback(&self) {
-        self.minimum_fallback_total
-            .fetch_add(1, Ordering::Relaxed);
+        self.minimum_fallback_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records a session rejected because the absolute ceiling was exhausted.
@@ -369,7 +366,9 @@ pub(crate) fn spawn_direct_buffer_budget_controller(
             budget.update_system_sample(sample);
 
             let snapshot = budget.snapshot();
-            let denied_delta = snapshot.promotion_denied_total.saturating_sub(previous_denied);
+            let denied_delta = snapshot
+                .promotion_denied_total
+                .saturating_sub(previous_denied);
             previous_denied = snapshot.promotion_denied_total;
             let fallback_delta = snapshot
                 .minimum_fallback_total
@@ -404,9 +403,7 @@ pub(crate) fn spawn_direct_buffer_budget_controller(
                 pool_snapshot.allocated,
                 pool_snapshot.allocated.saturating_sub(pool_snapshot.pooled),
             );
-            stats.set_buffer_pool_replaced_nonstandard_total(
-                pool_snapshot.replaced_nonstandard,
-            );
+            stats.set_buffer_pool_replaced_nonstandard_total(pool_snapshot.replaced_nonstandard);
 
             let headroom_target = if sample.total_bytes == 0 {
                 snapshot.hard_limit_bytes
@@ -454,11 +451,8 @@ fn connection_fill_pct(stats: &Stats, max_connections: u32) -> Option<u8> {
         return None;
     }
     Some(
-        ((stats
-            .get_current_connections_total()
-            .saturating_mul(100))
-            / u64::from(max_connections))
-        .min(100) as u8,
+        ((stats.get_current_connections_total().saturating_mul(100)) / u64::from(max_connections))
+            .min(100) as u8,
     )
 }
 
@@ -485,8 +479,7 @@ async fn read_system_memory_sample() -> SystemMemorySample {
         let cgroup_v2_max = read_cgroup_limit("/sys/fs/cgroup/memory.max").await;
         let cgroup_v2_current = read_u64_file("/sys/fs/cgroup/memory.current").await;
         let cgroup_v1_max = read_cgroup_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes").await;
-        let cgroup_v1_current =
-            read_u64_file("/sys/fs/cgroup/memory/memory.usage_in_bytes").await;
+        let cgroup_v1_current = read_u64_file("/sys/fs/cgroup/memory/memory.usage_in_bytes").await;
         let cgroup_max = cgroup_v2_max.or(cgroup_v1_max);
         let cgroup_current = cgroup_v2_current.or(cgroup_v1_current);
 
@@ -495,9 +488,9 @@ async fn read_system_memory_sample() -> SystemMemorySample {
             (host, Some(limit)) => host.min(limit),
             (host, None) => host,
         };
-        let cgroup_available = cgroup_max.zip(cgroup_current).map(|(limit, current)| {
-            limit.saturating_sub(current)
-        });
+        let cgroup_available = cgroup_max
+            .zip(cgroup_current)
+            .map(|(limit, current)| limit.saturating_sub(current));
         let available = match (host_available, cgroup_available) {
             (0, Some(value)) => value,
             (host, Some(value)) => host.min(value),

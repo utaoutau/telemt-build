@@ -9,10 +9,8 @@ use dashmap::DashMap;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::proxy::direct_buffer_budget::{DirectBufferBudget, fallback_direct_buffer_hard_limit};
 use crate::proxy::handshake::{AuthProbeSaturationState, AuthProbeState};
-use crate::proxy::direct_buffer_budget::{
-    DirectBufferBudget, fallback_direct_buffer_hard_limit,
-};
 use crate::proxy::middle_relay::{DesyncDedupRotationState, RelayIdleCandidateRegistry};
 use crate::proxy::traffic_limiter::TrafficLimiter;
 

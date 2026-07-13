@@ -114,11 +114,11 @@ impl Stats {
         );
     }
     pub(crate) fn release_me_writer_byte_budget_inflight_bytes(&self, bytes: u64) {
-        let _ = self.me_writer_byte_budget_inflight_bytes_gauge.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| Some(current.saturating_sub(bytes)),
-        );
+        let _ = self
+            .me_writer_byte_budget_inflight_bytes_gauge
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(bytes))
+            });
     }
     pub(crate) fn increment_me_writer_byte_budget_wait_total(&self) {
         if self.telemetry_me_allows_normal() {

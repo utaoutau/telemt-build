@@ -292,7 +292,8 @@ impl Stats {
     }
     /// Returns the count of blocking writer byte-budget waits.
     pub fn get_me_writer_byte_budget_wait_total(&self) -> u64 {
-        self.me_writer_byte_budget_wait_total.load(Ordering::Relaxed)
+        self.me_writer_byte_budget_wait_total
+            .load(Ordering::Relaxed)
     }
     /// Returns the count of writer byte-budget wait timeouts.
     pub fn get_me_writer_byte_budget_timeout_total(&self) -> u64 {

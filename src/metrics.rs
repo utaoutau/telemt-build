@@ -611,10 +611,7 @@ async fn render_metrics(
         out,
         "# HELP telemt_direct_relay_buffer_budget_bytes Direct relay copy-buffer budget and memory inputs"
     );
-    let _ = writeln!(
-        out,
-        "# TYPE telemt_direct_relay_buffer_budget_bytes gauge"
-    );
+    let _ = writeln!(out, "# TYPE telemt_direct_relay_buffer_budget_bytes gauge");
     for (kind, value) in [
         ("hard_limit", direct_budget.hard_limit_bytes),
         ("target", direct_budget.target_bytes),
@@ -2517,10 +2514,7 @@ async fn render_metrics(
         out,
         "# HELP telemt_me_writer_byte_budget_limit_bytes Configured resident-memory budget per ME writer"
     );
-    let _ = writeln!(
-        out,
-        "# TYPE telemt_me_writer_byte_budget_limit_bytes gauge"
-    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_byte_budget_limit_bytes gauge");
     let _ = writeln!(
         out,
         "telemt_me_writer_byte_budget_limit_bytes {}",

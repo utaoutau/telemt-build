@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
 use tracing::{debug, warn};
 
 use super::MePool;
@@ -74,16 +74,15 @@ async fn reserve_writer_command_slot(
 ) -> std::result::Result<mpsc::OwnedPermit<WriterCommand>, WriterCommandReserveError> {
     let reserve = tx.clone().reserve_owned();
     match deadline {
-        Some(deadline) => match tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            reserve,
-        )
-        .await
-        {
-            Ok(Ok(permit)) => Ok(permit),
-            Ok(Err(_)) => Err(WriterCommandReserveError::Closed),
-            Err(_) => Err(WriterCommandReserveError::TimedOut),
-        },
+        Some(deadline) => {
+            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reserve)
+                .await
+            {
+                Ok(Ok(permit)) => Ok(permit),
+                Ok(Err(_)) => Err(WriterCommandReserveError::Closed),
+                Err(_) => Err(WriterCommandReserveError::TimedOut),
+            }
+        }
         None => reserve.await.map_err(|_| WriterCommandReserveError::Closed),
     }
 }
@@ -102,7 +101,10 @@ fn writer_resident_permits(
     let permits = resident_bytes.div_ceil(ME_WRITER_BYTE_PERMIT_UNIT_BYTES);
     let permits = u32::try_from(permits).ok()?;
     let reserved_bytes = (permits as usize).checked_mul(ME_WRITER_BYTE_PERMIT_UNIT_BYTES)?;
-    Some((permits.max(1), reserved_bytes.max(ME_WRITER_BYTE_PERMIT_UNIT_BYTES)))
+    Some((
+        permits.max(1),
+        reserved_bytes.max(ME_WRITER_BYTE_PERMIT_UNIT_BYTES),
+    ))
 }
 
 fn proxy_req_resident_permits(
@@ -146,23 +148,18 @@ async fn reserve_writer_bytes(
 
     let acquire = byte_budget.clone().acquire_many_owned(permits);
     match deadline {
-        Some(deadline) => match tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            acquire,
-        )
-        .await
-        {
-            Ok(Ok(permit)) => Ok(WriterBytePermit::new(
-                permit,
-                reserved_bytes,
-                stats.clone(),
-            )),
-            Ok(Err(_)) => Err(WriterByteReserveError::Closed),
-            Err(_) => {
-                stats.increment_me_writer_byte_budget_timeout_total();
-                Err(WriterByteReserveError::TimedOut)
+        Some(deadline) => {
+            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), acquire)
+                .await
+            {
+                Ok(Ok(permit)) => Ok(WriterBytePermit::new(permit, reserved_bytes, stats.clone())),
+                Ok(Err(_)) => Err(WriterByteReserveError::Closed),
+                Err(_) => {
+                    stats.increment_me_writer_byte_budget_timeout_total();
+                    Err(WriterByteReserveError::TimedOut)
+                }
             }
-        },
+        }
         None => acquire
             .await
             .map(|permit| WriterBytePermit::new(permit, reserved_bytes, stats.clone()))
@@ -189,27 +186,21 @@ impl MePool {
             .len()
             .checked_add(LEGACY_PROXY_REQ_SOURCE_CAPACITY_OVERHEAD_BYTES)
         else {
-            self.stats
-                .increment_me_writer_byte_budget_oversize_total();
+            self.stats.increment_me_writer_byte_budget_oversize_total();
             return Err(ProxyError::Proxy(
                 "ME writer payload residency calculation overflow".into(),
             ));
         };
-        let Some((writer_byte_permits, writer_reserved_bytes)) = proxy_req_resident_permits(
-            source_capacity,
-            data.len(),
-            tag,
-            proto_flags,
-        ) else {
-            self.stats
-                .increment_me_writer_byte_budget_oversize_total();
+        let Some((writer_byte_permits, writer_reserved_bytes)) =
+            proxy_req_resident_permits(source_capacity, data.len(), tag, proto_flags)
+        else {
+            self.stats.increment_me_writer_byte_budget_oversize_total();
             return Err(ProxyError::Proxy(
                 "ME writer payload residency calculation overflow".into(),
             ));
         };
         if writer_byte_permits as usize > self.writer_lifecycle.writer_byte_budget_permits {
-            self.stats
-                .increment_me_writer_byte_budget_oversize_total();
+            self.stats.increment_me_writer_byte_budget_oversize_total();
             return Err(ProxyError::Proxy(
                 "ME writer payload exceeds configured byte budget".into(),
             ));
@@ -254,9 +245,8 @@ impl MePool {
         loop {
             if let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await
             {
-                let deadline = writer_send_deadline(
-                    self.route_runtime.me_route_blocking_send_timeout,
-                );
+                let deadline =
+                    writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
                 let writer_permit = match reserve_writer_bytes(
                     &current.byte_budget,
                     writer_byte_permits,
@@ -275,7 +265,10 @@ impl MePool {
                         ));
                     }
                     Err(WriterByteReserveError::Closed) => {
-                        warn!(writer_id = current.writer_id, "ME writer byte budget closed");
+                        warn!(
+                            writer_id = current.writer_id,
+                            "ME writer byte budget closed"
+                        );
                         self.remove_writer_and_close_clients(current.writer_id)
                             .await;
                         continue;
@@ -293,12 +286,7 @@ impl MePool {
                         return Ok(());
                     }
                     Err(TrySendError::Full(cmd)) => {
-                        match reserve_writer_command_slot(
-                            &current.tx,
-                            deadline,
-                        )
-                        .await
-                        {
+                        match reserve_writer_command_slot(&current.tx, deadline).await {
                             Ok(permit) => {
                                 permit.send(cmd);
                                 self.note_hybrid_route_success();
@@ -716,9 +704,7 @@ impl MePool {
             }
             self.stats
                 .increment_me_writer_pick_blocking_fallback_total();
-            let deadline = writer_send_deadline(
-                self.route_runtime.me_route_blocking_send_timeout,
-            );
+            let deadline = writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
             let writer_permit = match reserve_writer_bytes(
                 &w.byte_budget,
                 writer_byte_permits,
@@ -801,24 +787,20 @@ impl MePool {
             tag.as_ref().map(|tag| tag.as_slice()),
             proto_flags,
         ) else {
-            self.stats
-                .increment_me_writer_byte_budget_oversize_total();
+            self.stats.increment_me_writer_byte_budget_oversize_total();
             return Err(ProxyError::Proxy(
                 "ME writer payload residency calculation overflow".into(),
             ));
         };
         if writer_byte_permits as usize > self.writer_lifecycle.writer_byte_budget_permits {
-            self.stats
-                .increment_me_writer_byte_budget_oversize_total();
+            self.stats.increment_me_writer_byte_budget_oversize_total();
             return Err(ProxyError::Proxy(
                 "ME writer payload exceeds configured byte budget".into(),
             ));
         }
 
         if let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await {
-            let deadline = writer_send_deadline(
-                self.route_runtime.me_route_blocking_send_timeout,
-            );
+            let deadline = writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
             let writer_permit = match reserve_writer_bytes(
                 &current.byte_budget,
                 writer_byte_permits,
@@ -837,7 +819,10 @@ impl MePool {
                     ));
                 }
                 Err(WriterByteReserveError::Closed) => {
-                    warn!(writer_id = current.writer_id, "ME writer byte budget closed");
+                    warn!(
+                        writer_id = current.writer_id,
+                        "ME writer byte budget closed"
+                    );
                     self.remove_writer_and_close_clients(current.writer_id)
                         .await;
                     return self
@@ -870,12 +855,7 @@ impl MePool {
                     return Ok(());
                 }
                 Err(TrySendError::Full(cmd)) => {
-                    match reserve_writer_command_slot(
-                        &current.tx,
-                        deadline,
-                    )
-                    .await
-                    {
+                    match reserve_writer_command_slot(&current.tx, deadline).await {
                         Ok(permit) => {
                             permit.send(cmd);
                             self.note_hybrid_route_success();
