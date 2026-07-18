@@ -1474,6 +1474,10 @@ Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activatin
 
 Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. API, metrics, client TCP/Unix listeners, PID ownership, and logging remain process-scoped; changed bind/path fields are reported as deferred and do not cause Maestro to invoke systemd, containerd, or another process supervisor.
 
+Reload preparation requires every configured TLS-front domain to have a non-default cached profile and requires a ready Middle-End pool when direct fallback is disabled. A candidate that does not satisfy either readiness condition fails without replacing the active generation.
+
+The revision is verified again after preparation. With `failure_policy=rollback`, a changed revision or revision read failure rolls the candidate back; with `failure_policy=keep_new`, the condition is reported in `warnings` and activation continues.
+
 ## Mutation Semantics
 
 | Endpoint | Notes |
