@@ -503,7 +503,6 @@ async fn run_telemt_core(
         config.access.cidr_rate_limits.clone(),
     );
 
-    let (api_config_tx, api_config_rx) = watch::channel(Arc::new(config.clone()));
     let (detected_ips_tx, detected_ips_rx) = watch::channel((None::<IpAddr>, None::<IpAddr>));
     let initial_direct_first = config.general.use_middle_proxy && config.general.me2dc_fallback;
     let initial_admission_open = !config.general.use_middle_proxy || initial_direct_first;
@@ -511,6 +510,8 @@ async fn run_telemt_core(
     let (reload_control, reload_commands) = reload::ReloadControl::channel(1);
     let (active_runtime_tx, active_runtime_rx) =
         watch::channel(None::<Arc<ArcSwap<generation::RuntimeGeneration>>>);
+    let (runtime_watch_tx, runtime_watch_rx) =
+        watch::channel(None::<generation::RuntimeWatchState>);
     let initial_route_mode = if !config.general.use_middle_proxy || initial_direct_first {
         RelayRouteMode::Direct
     } else {
@@ -544,14 +545,13 @@ async fn run_telemt_core(
             let upstream_manager_api = upstream_manager.clone();
             let route_runtime_api = route_runtime.clone();
             let proxy_shared_api = shared_state.clone();
-            let config_rx_api = api_config_rx.clone();
-            let admission_rx_api = admission_rx.clone();
             let config_path_api = config_path.clone();
             let quota_state_path_api = quota_state_path.clone();
             let startup_tracker_api = startup_tracker.clone();
             let detected_ips_rx_api = detected_ips_rx.clone();
             let reload_control_api = reload_control.clone();
             let active_runtime_rx_api = active_runtime_rx.clone();
+            let runtime_watch_rx_api = runtime_watch_rx.clone();
             tokio::spawn(async move {
                 api::serve(
                     listen,
@@ -561,8 +561,6 @@ async fn run_telemt_core(
                     route_runtime_api,
                     proxy_shared_api,
                     upstream_manager_api,
-                    config_rx_api,
-                    admission_rx_api,
                     config_path_api,
                     quota_state_path_api,
                     detected_ips_rx_api,
@@ -570,6 +568,7 @@ async fn run_telemt_core(
                     startup_tracker_api,
                     reload_control_api,
                     active_runtime_rx_api,
+                    runtime_watch_rx_api,
                 )
                 .await;
             });
@@ -610,8 +609,9 @@ async fn run_telemt_core(
         upstream_manager.clone(),
         &startup_tracker,
         runtime_task_scope.clone(),
+        tls_bootstrap::TlsBootstrapPolicy::BestEffort,
     )
-    .await;
+    .await?;
 
     startup_tracker
         .start_component(
@@ -737,6 +737,7 @@ async fn run_telemt_core(
             stats.clone(),
             api_me_pool.clone(),
             me_ready_tx.clone(),
+            runtime_task_scope.clone(),
         )
         .await
     };
@@ -824,7 +825,6 @@ async fn run_telemt_core(
         rng.clone(),
         ip_tracker.clone(),
         beobachten.clone(),
-        api_config_tx.clone(),
         me_pool.clone(),
         shared_state.clone(),
         me_ready_tx.clone(),
@@ -869,6 +869,7 @@ async fn run_telemt_core(
                     stats_bg.clone(),
                     api_me_pool_bg.clone(),
                     me_ready_tx_bg.clone(),
+                    task_scope_bg.clone(),
                 )
                 .await;
                 if let Some(pool) = pool {
@@ -961,6 +962,7 @@ async fn run_telemt_core(
         quota_store,
         detected_ips_tx,
         runtime_log_filter,
+        runtime_watch_tx.clone(),
     );
 
     let bound = listeners::bind_listeners(
@@ -988,12 +990,12 @@ async fn run_telemt_core(
     // On Unix, caller supplies privilege drop after bind (may require root for port < 1024).
     drop_after_bind();
 
-    synlimit_control::reconcile_synlimit_rules(&config).await;
-    synlimit_control::spawn_synlimit_controller(config_rx.clone());
+    let synlimit_controller = synlimit_control::spawn_synlimit_controller(runtime_watch_rx);
 
     runtime_tasks::spawn_metrics_if_configured(&config, &startup_tracker, active_runtime.clone())
         .await;
 
+    runtime_watch_tx.send_replace(Some(active_runtime.load_full().watch_state()));
     active_runtime_tx.send_replace(Some(active_runtime.clone()));
     runtime_tasks::mark_runtime_ready(&startup_tracker).await;
 
@@ -1004,7 +1006,13 @@ async fn run_telemt_core(
     #[cfg(unix)]
     listeners::spawn_unix_accept_loop(unix_listener, active_runtime.clone());
 
-    shutdown::wait_for_shutdown(process_started_at, active_runtime, quota_state_path).await;
+    shutdown::wait_for_shutdown(
+        process_started_at,
+        active_runtime,
+        quota_state_path,
+        synlimit_controller,
+    )
+    .await;
 
     Ok(())
 }

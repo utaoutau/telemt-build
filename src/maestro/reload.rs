@@ -138,7 +138,11 @@ pub(crate) struct ReloadStatus {
     pub(crate) started_at_epoch_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) finished_at_epoch_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "deferred_process_fields",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub(crate) deferred_fields: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) warnings: Vec<String>,
@@ -426,6 +430,31 @@ mod tests {
         assert_eq!(request.timeout_secs, Some(30));
         assert_eq!(request.failure_policy, ReloadFailurePolicy::Rollback);
         assert!(ReloadRequest::from_query(Some("timeout_secs=30")).is_err());
+    }
+
+    #[test]
+    fn status_uses_documented_deferred_process_fields_key() {
+        let status = ReloadStatus {
+            reload_id: 1,
+            target_generation: 2,
+            config_revision: "revision".to_string(),
+            state: ReloadPhase::Succeeded,
+            mode: ReloadMode::Instant,
+            failure_policy: ReloadFailurePolicy::KeepNew,
+            requested_at_epoch_secs: 10,
+            started_at_epoch_secs: Some(11),
+            finished_at_epoch_secs: Some(12),
+            deferred_fields: vec!["server.listeners".to_string()],
+            warnings: Vec::new(),
+            error: None,
+        };
+        let value = serde_json::to_value(status).unwrap();
+
+        assert_eq!(
+            value["deferred_process_fields"],
+            serde_json::json!(["server.listeners"])
+        );
+        assert!(value.get("deferred_fields").is_none());
     }
 
     #[tokio::test]

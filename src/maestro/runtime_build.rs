@@ -34,7 +34,7 @@ pub(crate) struct PreparedRuntime {
 
 pub(crate) async fn prepare_runtime(
     generation_id: u64,
-    mut config: ProxyConfig,
+    config: ProxyConfig,
     config_path: &Path,
     quota_store: Arc<QuotaStore>,
     runtime_log_filter: RuntimeLogFilter,
@@ -112,8 +112,10 @@ pub(crate) async fn prepare_runtime(
         upstream_manager.clone(),
         &startup_tracker,
         task_scope.clone(),
+        tls_bootstrap::TlsBootstrapPolicy::RequireReady,
     )
-    .await;
+    .await
+    .map_err(|error| error.to_string())?;
 
     let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
@@ -140,11 +142,20 @@ pub(crate) async fn prepare_runtime(
             stats.clone(),
             me_pool_runtime.clone(),
             me_ready_tx.clone(),
+            task_scope.clone(),
         )
         .await
     };
-    if config.general.use_middle_proxy && me_pool.is_none() && !direct_first_startup {
-        config.general.use_middle_proxy = false;
+    if strict_middle_proxy_unavailable(
+        config.general.use_middle_proxy,
+        direct_first_startup,
+        me_pool.is_some(),
+    ) {
+        task_scope.stop().await;
+        return Err(
+            "Middle-End pool is required but did not become ready during reload preparation"
+                .to_string(),
+        );
     }
 
     let config = Arc::new(config);
@@ -159,7 +170,6 @@ pub(crate) async fn prepare_runtime(
         config.server.max_connections as usize
     };
     let max_connections = Arc::new(Semaphore::new(max_connections_limit));
-    let (api_config_tx, _) = watch::channel(config.clone());
     let watches = runtime_tasks::spawn_runtime_tasks(
         &config,
         config_path,
@@ -175,7 +185,6 @@ pub(crate) async fn prepare_runtime(
         rng.clone(),
         ip_tracker.clone(),
         beobachten.clone(),
-        api_config_tx,
         me_pool.clone(),
         proxy_shared.clone(),
         me_ready_tx.clone(),
@@ -226,6 +235,7 @@ pub(crate) async fn prepare_runtime(
                     stats_bg.clone(),
                     me_pool_runtime_bg.clone(),
                     me_ready_tx_bg.clone(),
+                    task_scope_bg.clone(),
                 )
                 .await;
                 if let Some(pool) = pool {
@@ -291,6 +301,14 @@ pub(crate) async fn prepare_runtime(
     })
 }
 
+fn strict_middle_proxy_unavailable(
+    use_middle_proxy: bool,
+    direct_first_startup: bool,
+    pool_available: bool,
+) -> bool {
+    use_middle_proxy && !direct_first_startup && !pool_available
+}
+
 pub(crate) fn deferred_process_fields(old: &ProxyConfig, new: &ProxyConfig) -> Vec<String> {
     let mut fields = Vec::new();
     if old.server.port != new.server.port
@@ -353,5 +371,13 @@ mod tests {
         let mut new = old.clone();
         new.censorship.tls_domain = "reload.example".to_string();
         assert!(deferred_process_fields(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn strict_middle_proxy_requires_a_prepared_pool() {
+        assert!(strict_middle_proxy_unavailable(true, false, false));
+        assert!(!strict_middle_proxy_unavailable(true, false, true));
+        assert!(!strict_middle_proxy_unavailable(true, true, false));
+        assert!(!strict_middle_proxy_unavailable(false, false, false));
     }
 }

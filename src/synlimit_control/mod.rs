@@ -4,6 +4,7 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use crate::config::{ProxyConfig, SynLimitMode};
+use crate::maestro::generation::RuntimeWatchState;
 
 mod command;
 mod iptables;
@@ -15,28 +16,105 @@ use self::model::{SynLimitNamespace, synlimit_namespace, synlimit_targets};
 
 static ACTIVE_SYNLIMIT_NAMESPACE: Mutex<Option<SynLimitNamespace>> = Mutex::new(None);
 
-pub(crate) fn spawn_synlimit_controller(config_rx: watch::Receiver<Arc<ProxyConfig>>) {
+/// Spawns the process-scoped SYN limiter reconciler for active generations.
+pub(crate) fn spawn_synlimit_controller(
+    runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
+) -> tokio::task::JoinHandle<()> {
     if !cfg!(target_os = "linux") {
-        if has_synlimit_config(&config_rx.borrow()) {
-            warn!("SYN limiter is configured but unsupported on this OS; skipping netfilter rules");
-        }
-        return;
+        return tokio::spawn(watch_active_runtime_configs(
+            runtime_watch_rx,
+            |_generation_id, cfg| async move {
+                if has_synlimit_config(&cfg) {
+                    warn!(
+                        "SYN limiter is configured but unsupported on this OS; skipping netfilter rules"
+                    );
+                }
+            },
+        ));
     }
 
-    tokio::spawn(async move {
-        wait_for_config_channel_close_and_reconcile(config_rx).await;
-        if let Err(error) = clear_synlimit_rules_all_backends().await {
-            warn!(error = %error, "Failed to clear SYN limiter rules after config channel close");
-        }
-    });
+    tokio::spawn(watch_active_runtime_configs(
+        runtime_watch_rx,
+        |_generation_id, cfg| async move {
+            reconcile_synlimit_rules(&cfg).await;
+        },
+    ))
 }
 
-async fn wait_for_config_channel_close_and_reconcile(
-    mut config_rx: watch::Receiver<Arc<ProxyConfig>>,
-) {
-    while config_rx.changed().await.is_ok() {
-        let cfg = config_rx.borrow_and_update().clone();
-        reconcile_synlimit_rules(&cfg).await;
+async fn watch_active_runtime_configs<F, Fut>(
+    mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
+    mut on_config: F,
+)
+where
+    F: FnMut(u64, Arc<ProxyConfig>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut current = loop {
+        if let Some(state) = runtime_watch_rx.borrow().clone() {
+            break state;
+        }
+        if runtime_watch_rx.changed().await.is_err() {
+            return;
+        }
+    };
+    let initial_config = current.config_rx.borrow().clone();
+    on_config(current.generation_id, initial_config).await;
+
+    loop {
+        tokio::select! {
+            biased;
+            changed = runtime_watch_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let Some(next) = runtime_watch_rx.borrow().clone() else {
+                    continue;
+                };
+                if next.generation_id != current.generation_id {
+                    current = next;
+                    let config = current.config_rx.borrow().clone();
+                    on_config(current.generation_id, config).await;
+                }
+            }
+            changed = current.config_rx.changed() => {
+                if changed.is_err() {
+                    let Some(next) = wait_for_new_runtime(
+                        &mut runtime_watch_rx,
+                        current.generation_id,
+                    ).await else {
+                        break;
+                    };
+                    current = next;
+                    let config = current.config_rx.borrow().clone();
+                    on_config(current.generation_id, config).await;
+                    continue;
+                }
+                let active_generation_id = runtime_watch_rx
+                    .borrow()
+                    .as_ref()
+                    .map(|state| state.generation_id);
+                if active_generation_id == Some(current.generation_id) {
+                    let cfg = current.config_rx.borrow_and_update().clone();
+                    on_config(current.generation_id, cfg).await;
+                }
+            }
+        }
+    }
+}
+
+async fn wait_for_new_runtime(
+    runtime_watch_rx: &mut watch::Receiver<Option<RuntimeWatchState>>,
+    previous_generation_id: u64,
+) -> Option<RuntimeWatchState> {
+    loop {
+        if let Some(state) = runtime_watch_rx.borrow().clone()
+            && state.generation_id != previous_generation_id
+        {
+            return Some(state);
+        }
+        if runtime_watch_rx.changed().await.is_err() {
+            return None;
+        }
     }
 }
 
@@ -167,4 +245,71 @@ fn has_synlimit_config(cfg: &ProxyConfig) -> bool {
         .listeners
         .iter()
         .any(|listener| !matches!(listener.synlimit, SynLimitMode::Off))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    fn runtime_state(
+        generation_id: u64,
+        max_connections: u32,
+    ) -> (
+        RuntimeWatchState,
+        watch::Sender<Arc<ProxyConfig>>,
+        watch::Sender<bool>,
+    ) {
+        let mut config = ProxyConfig::default();
+        config.server.max_connections = max_connections;
+        let (config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (admission_tx, admission_rx) = watch::channel(true);
+        (
+            RuntimeWatchState {
+                generation_id,
+                config_rx,
+                admission_rx,
+            },
+            config_tx,
+            admission_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn config_watcher_ignores_retired_generation_updates() {
+        let (initial, initial_config_tx, _initial_admission_tx) = runtime_state(1, 10);
+        let (runtime_tx, runtime_rx) = watch::channel(Some(initial));
+        let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+        let watcher = tokio::spawn(watch_active_runtime_configs(
+            runtime_rx,
+            move |generation_id, cfg| {
+                let observed_tx = observed_tx.clone();
+                async move {
+                    let _ = observed_tx.send((generation_id, cfg.server.max_connections));
+                }
+            },
+        ));
+
+        assert_eq!(observed_rx.recv().await, Some((1, 10)));
+        let (next, next_config_tx, _next_admission_tx) = runtime_state(2, 20);
+        runtime_tx.send_replace(Some(next));
+        assert_eq!(observed_rx.recv().await, Some((2, 20)));
+
+        let mut stale = ProxyConfig::default();
+        stale.server.max_connections = 30;
+        initial_config_tx.send_replace(Arc::new(stale));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), observed_rx.recv())
+                .await
+                .is_err()
+        );
+
+        let mut active = ProxyConfig::default();
+        active.server.max_connections = 40;
+        next_config_tx.send_replace(Arc::new(active));
+        assert_eq!(observed_rx.recv().await, Some((2, 40)));
+
+        watcher.abort();
+    }
 }

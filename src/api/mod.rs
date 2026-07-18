@@ -20,9 +20,9 @@ use tokio::sync::{Mutex, RwLock, Semaphore, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::config::{ApiGrayAction, ProxyConfig};
+use crate::config::ApiGrayAction;
 use crate::ip_tracker::UserIpTracker;
-use crate::maestro::generation::RuntimeGeneration;
+use crate::maestro::generation::{RuntimeGeneration, RuntimeWatchState};
 use crate::maestro::reload::{ReloadControl, ReloadRequest, ReloadSubmitError};
 use crate::proxy::route_mode::RouteRuntimeController;
 use crate::proxy::shared_state::ProxySharedState;
@@ -240,8 +240,6 @@ pub async fn serve(
     route_runtime: Arc<RouteRuntimeController>,
     proxy_shared: Arc<ProxySharedState>,
     upstream_manager: Arc<UpstreamManager>,
-    config_rx: watch::Receiver<Arc<ProxyConfig>>,
-    admission_rx: watch::Receiver<bool>,
     config_path: PathBuf,
     quota_state_path: PathBuf,
     detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
@@ -249,6 +247,7 @@ pub async fn serve(
     startup_tracker: Arc<StartupTracker>,
     reload_control: ReloadControl,
     mut active_runtime_rx: watch::Receiver<Option<Arc<ArcSwap<RuntimeGeneration>>>>,
+    mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
 ) {
     let active_runtime = loop {
         if let Some(active_runtime) = active_runtime_rx.borrow().clone() {
@@ -259,6 +258,17 @@ pub async fn serve(
             return;
         }
     };
+    let initial_watch_state = loop {
+        if let Some(watch_state) = runtime_watch_rx.borrow().clone() {
+            break watch_state;
+        }
+        if runtime_watch_rx.changed().await.is_err() {
+            warn!("Runtime watch channel closed before API bootstrap");
+            return;
+        }
+    };
+    let config_rx = initial_watch_state.config_rx.clone();
+    let admission_rx = initial_watch_state.admission_rx.clone();
     let listener = match TcpListener::bind(listen).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -306,8 +316,7 @@ pub async fn serve(
     });
 
     spawn_runtime_watchers(
-        config_rx.clone(),
-        admission_rx.clone(),
+        runtime_watch_rx,
         runtime_state.clone(),
         shared.runtime_events.clone(),
     );

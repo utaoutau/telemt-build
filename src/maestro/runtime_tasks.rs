@@ -103,7 +103,6 @@ pub(crate) async fn spawn_runtime_tasks(
     rng: Arc<SecureRandom>,
     ip_tracker: Arc<UserIpTracker>,
     beobachten: Arc<BeobachtenStore>,
-    api_config_tx: watch::Sender<Arc<ProxyConfig>>,
     me_pool_for_policy: Option<Arc<MePool>>,
     shared_state: Arc<ProxySharedState>,
     me_ready_tx: watch::Sender<u64>,
@@ -166,18 +165,6 @@ pub(crate) async fn spawn_runtime_tasks(
             Some("config hot-reload watcher started".to_string()),
         )
         .await;
-    let mut config_rx_api_bridge = config_rx.clone();
-    let api_config_tx_bridge = api_config_tx.clone();
-    task_scope.spawn(async move {
-        loop {
-            if config_rx_api_bridge.changed().await.is_err() {
-                break;
-            }
-            let cfg = config_rx_api_bridge.borrow_and_update().clone();
-            api_config_tx_bridge.send_replace(cfg);
-        }
-    });
-
     let stats_policy = stats.clone();
     let upstream_policy = upstream_manager.clone();
     let mut config_rx_policy = config_rx.clone();

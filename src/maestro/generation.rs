@@ -22,6 +22,14 @@ use crate::transport::middle_proxy::MePool;
 const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Process-visible control-plane receivers for one active runtime generation.
+#[derive(Clone)]
+pub(crate) struct RuntimeWatchState {
+    pub(crate) generation_id: u64,
+    pub(crate) config_rx: watch::Receiver<Arc<ProxyConfig>>,
+    pub(crate) admission_rx: watch::Receiver<bool>,
+}
+
 /// Cancellation and join ownership for one generation's background tasks.
 #[derive(Clone)]
 pub(crate) struct RuntimeTaskScope {
@@ -132,6 +140,15 @@ impl RuntimeGeneration {
 
     pub(crate) fn config(&self) -> Arc<ProxyConfig> {
         self.config_rx.borrow().clone()
+    }
+
+    /// Returns receivers used by process-scoped observers of this generation.
+    pub(crate) fn watch_state(&self) -> RuntimeWatchState {
+        RuntimeWatchState {
+            generation_id: self.id,
+            config_rx: self.config_rx.clone(),
+            admission_rx: self.admission_rx.clone(),
+        }
     }
 
     pub(crate) async fn current_me_pool(&self) -> Option<Arc<MePool>> {

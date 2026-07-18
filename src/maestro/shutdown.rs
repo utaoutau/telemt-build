@@ -50,9 +50,17 @@ pub(crate) async fn wait_for_shutdown(
     process_started_at: Instant,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
+    synlimit_controller: tokio::task::JoinHandle<()>,
 ) {
     let signal = wait_for_shutdown_signal().await;
-    perform_shutdown(signal, process_started_at, active_runtime, quota_state_path).await;
+    perform_shutdown(
+        signal,
+        process_started_at,
+        active_runtime,
+        quota_state_path,
+        synlimit_controller,
+    )
+    .await;
 }
 
 /// Waits for any shutdown signal (SIGINT, SIGTERM, SIGQUIT).
@@ -81,6 +89,7 @@ async fn perform_shutdown(
     process_started_at: Instant,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
+    synlimit_controller: tokio::task::JoinHandle<()>,
 ) {
     let runtime = active_runtime.load_full();
     let stats = runtime.stats.as_ref();
@@ -96,12 +105,9 @@ async fn perform_shutdown(
     let uptime_secs = process_started_at.elapsed().as_secs();
     info!("Uptime: {}", format_uptime(uptime_secs));
 
-    if let Err(error) = synlimit_control::clear_synlimit_rules_all_backends().await {
-        warn!(error = %error, "Failed to clear SYN limiter rules during shutdown");
-    }
-
     // Graceful ME pool shutdown
     runtime.stop_sessions().await;
+    runtime.stop_background_tasks().await;
     if let Some(pool) = runtime.current_me_pool().await {
         match tokio::time::timeout(Duration::from_secs(2), pool.shutdown_send_close_conn_all())
             .await
@@ -117,7 +123,12 @@ async fn perform_shutdown(
             }
         }
     }
-    runtime.stop_background_tasks().await;
+
+    synlimit_controller.abort();
+    let _ = synlimit_controller.await;
+    if let Err(error) = synlimit_control::clear_synlimit_rules_all_backends().await {
+        warn!(error = %error, "Failed to clear SYN limiter rules during shutdown");
+    }
 
     match crate::quota_state::save_quota_state(&quota_state_path, stats).await {
         Ok(()) => {
