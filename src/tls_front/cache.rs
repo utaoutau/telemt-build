@@ -196,11 +196,7 @@ impl TlsFrontCache {
         domains
             .iter()
             .filter(|domain| {
-                guard
-                    .get(domain.as_str())
-                    .unwrap_or(&self.default)
-                    .domain
-                    == "default"
+                guard.get(domain.as_str()).unwrap_or(&self.default).domain == "default"
             })
             .cloned()
             .collect()

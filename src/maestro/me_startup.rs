@@ -30,7 +30,10 @@ where
     loop {
         let result = AbortOnDropHandle::new(tokio::spawn(task())).await;
         match result {
-            Ok(()) => warn!(task = task_name, "Middle-End supervisor task exited unexpectedly, restarting"),
+            Ok(()) => warn!(
+                task = task_name,
+                "Middle-End supervisor task exited unexpectedly, restarting"
+            ),
             Err(error) => {
                 error!(task = task_name, error = %error, "Middle-End supervisor task panicked, restarting in 1s");
                 tokio::time::sleep(Duration::from_secs(1)).await;

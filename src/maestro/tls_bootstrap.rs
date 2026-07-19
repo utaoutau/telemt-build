@@ -39,11 +39,7 @@ impl TlsFetchContext {
         let mut join = tokio::task::JoinSet::new();
         for domain in self.domains.clone() {
             let cache = self.cache.clone();
-            let host = tls_fetch_host_for_domain(
-                &self.mask_host,
-                &self.primary_domain,
-                &domain,
-            );
+            let host = tls_fetch_host_for_domain(&self.mask_host, &self.primary_domain, &domain);
             let unix_sock = self.mask_unix_sock.clone();
             let scope = self.tls_fetch_scope.clone();
             let upstream = self.upstream_manager.clone();
